@@ -82,11 +82,37 @@ describe.skipIf(skip)('schema drift: PGLite ↔ Postgres post-initSchema parity 
     // gateway model. On a re-run, `CREATE TABLE IF NOT EXISTS` is a no-op so
     // the stale default sticks while PGLite (always fresh-in-memory) gets the
     // engine fallback. That produced a phantom drift unrelated to schema
-    // parity. Resetting public schema isolates the test from caller setup.
+    // parity.
+    //
+    // SAFETY GATE (codex P0): DROP SCHEMA public CASCADE is destructive. Refuse
+    // unless the target looks like a fresh test DB. Multiple belt-and-suspenders
+    // checks — any one fails, the test SKIPS the reset (and likely fails the
+    // parity check, which is the right failure mode vs nuking a prod DB).
     pg = new PostgresEngine();
     await pg.connect({ database_url: DATABASE_URL! });
     const pgConnPre = (pg as any).sql;
-    await pgConnPre.unsafe('DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public;');
+
+    const url = new URL(DATABASE_URL!);
+    const dbName = url.pathname.replace(/^\//, '');
+    const host = url.hostname;
+    const isLocalhost = host === 'localhost' || host === '127.0.0.1' || host.endsWith('.local');
+    const looksLikeTestDb = /^(gbrain_test|.*_test|test_.*|.*_e2e)$/i.test(dbName);
+    const explicitOptIn = process.env.GBRAIN_TEST_DB === '1';
+    const resetAllowed = explicitOptIn || (isLocalhost && looksLikeTestDb);
+
+    if (resetAllowed) {
+      await pgConnPre.unsafe('DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public;');
+    } else {
+      // Surface a loud, paste-ready hint. The test will still try initSchema;
+      // if the caller already had a fresh DB the parity check passes anyway.
+      console.warn(
+        `[schema-drift] Skipping DROP SCHEMA — DATABASE_URL targets host="${host}" db="${dbName}". ` +
+          `Refusing to nuke a non-test database. ` +
+          `Set GBRAIN_TEST_DB=1 to override, or point DATABASE_URL at localhost + a test-named DB ` +
+          `(e.g. gbrain_test, *_test, test_*).`,
+      );
+    }
+
     await pg.initSchema();
 
     // Snapshot both. PGLite returns `{rows}`, postgres.js returns the array.

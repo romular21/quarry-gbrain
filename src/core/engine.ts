@@ -274,18 +274,21 @@ export interface TakesScorecard {
   partial_rate: number | null;
   /**
    * v0.36.1.1: count of rows where `resolved_quality = 'unresolvable'`.
-   * Sibling field to `resolved` so historical comparisons against pre-v74
+   * Sibling field to `resolved` so historical comparisons against pre-v79
    * scorecards stay valid; `resolved` retains its 3-state meaning, and
-   * unresolvable rows count here separately.
+   * unresolvable rows count here separately. Optional for SDK back-compat —
+   * downstream consumers constructing TakesScorecard fixtures shouldn't have
+   * to update on a hotfix. `finalizeScorecard` always populates it.
    */
-  unresolvable_count: number;
+  unresolvable_count?: number;
   /**
-   * v0.36.1.1: `unresolvable_count / (resolved + unresolvable_count)`. NULL
+   * v0.37.0.1: `unresolvable_count / (resolved + unresolvable_count)`. NULL
    * when both are 0. Surfaces the spec's headline calibration signal:
    * "what fraction of grade-attempted takes couldn't be graded?" — high
    * values signal weak evidence retrieval rather than wrong predictions.
+   * Optional for SDK back-compat; see `unresolvable_count` note above.
    */
-  unresolvable_rate: number | null;
+  unresolvable_rate?: number | null;
 }
 
 export interface TakesScorecardOpts {
