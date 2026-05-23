@@ -275,6 +275,70 @@ async function runRemove(engine: BrainEngine, args: string[]): Promise<void> {
 
 // ── Subcommand: archive (soft-delete) ───────────────────────
 
+// ── Subcommand: set-cr-mode (v0.40.3.0 — D5) ────────────────
+//
+// `gbrain sources set-cr-mode <id> <none|title|per_chunk_synopsis>`
+// writes sources.contextual_retrieval_mode for the per-source override
+// resolver. Empty value / "unset" / "default" clears the column (NULL
+// falls through to the global mode).
+//
+// Loud rejection on:
+//   - missing id
+//   - missing mode
+//   - invalid mode (lists valid options)
+//   - non-existent source id (lists registered sources via paste-ready hint)
+//
+// D5 picked the narrow verb over a generic `sources set <key> <value>`
+// because per-field validation actually matters (CRMode validation must
+// run; future fields may need bespoke prompts). The generic mutator is
+// filed as a v0.41+ TODO when 3+ writable fields exist.
+
+async function runSetCrMode(engine: BrainEngine, args: string[]): Promise<void> {
+  const { isCRMode, CR_MODES } = await import('../core/types.ts');
+  const id = args[0];
+  const mode = args[1];
+
+  if (!id || !mode) {
+    console.error('Usage: gbrain sources set-cr-mode <id> <none|title|per_chunk_synopsis>');
+    console.error('  Pass "unset" or "default" to clear the override (NULL falls through).');
+    process.exit(2);
+  }
+
+  // Clear path: empty / "unset" / "default" → NULL.
+  const clearing = mode === 'unset' || mode === 'default' || mode === '';
+  if (!clearing && !isCRMode(mode)) {
+    console.error(`Error: invalid CR mode "${mode}".`);
+    console.error(`Valid options: ${CR_MODES.join(' | ')}`);
+    console.error(`  Or pass "unset" / "default" to clear the override.`);
+    process.exit(2);
+  }
+
+  // Loud-rejection on missing source. Closes the idempotent-pebble Failure
+  // Modes "critical gap": pre-v0.40.3.0 there was no surface that wrote to
+  // sources.contextual_retrieval_mode, so the silent-no-op via SQL UPDATE
+  // matching 0 rows was the failure mode the gap warning called out.
+  const exists = await engine.executeRaw<{ id: string }>(
+    `SELECT id FROM sources WHERE id = $1 LIMIT 1`,
+    [id],
+  );
+  if (exists.length === 0) {
+    console.error(`Error: source "${id}" not found.`);
+    console.error(`  Run 'gbrain sources list' to see registered sources.`);
+    process.exit(4);
+  }
+
+  const newValue = clearing ? null : mode;
+  await engine.executeRaw(
+    `UPDATE sources SET contextual_retrieval_mode = $1 WHERE id = $2`,
+    [newValue, id],
+  );
+  if (clearing) {
+    console.log(`Cleared contextual_retrieval_mode for source "${id}" (NULL falls through to global mode).`);
+  } else {
+    console.log(`Set source "${id}" contextual_retrieval_mode = ${mode}.`);
+  }
+}
+
 async function runArchive(engine: BrainEngine, args: string[]): Promise<void> {
   const id = args[0];
   if (!id) {
@@ -551,6 +615,7 @@ export async function runSources(engine: BrainEngine, args: string[]): Promise<v
     case 'purge':      return runPurge(engine, rest);
     case 'archived':   return runListArchived(engine, rest);
     case 'current':    return runCurrent(engine, rest);
+    case 'set-cr-mode': return runSetCrMode(engine, rest);
     case undefined:
     case '--help':
     case '-h':
@@ -592,6 +657,11 @@ Subcommands:
                                     targeting the brain you think you are.
   federate <id>                     Make source appear in cross-source default search.
   unfederate <id>                   Isolate source from default search.
+  set-cr-mode <id> <none|title|per_chunk_synopsis>
+                                    Per-source contextual retrieval mode
+                                    override (v0.40.3.0). Pass "unset" or
+                                    "default" to clear (NULL falls through
+                                    to the global search.mode bundle).
 
 Source id: [a-z0-9-]{1,32}. Immutable citation key.
 

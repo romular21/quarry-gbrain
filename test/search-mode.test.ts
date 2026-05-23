@@ -49,6 +49,11 @@ describe('SEARCH_MODES + MODE_BUNDLES canonical shape', () => {
     cross_modal_llm_intent: false,
   };
 
+  // v0.40.3.0 contextual retrieval per-mode defaults. Tests below spread
+  // this AFTER CROSS_MODAL_DEFAULTS so each per-mode block overrides
+  // contextual_retrieval to its tier value.
+  const CR_DISABLED_DEFAULT = { contextual_retrieval_disabled: false };
+
   test('conservative bundle values are canonical', () => {
     expect(MODE_BUNDLES.conservative).toEqual({
       cache_enabled: true,
@@ -66,6 +71,8 @@ describe('SEARCH_MODES + MODE_BUNDLES canonical shape', () => {
       floor_ratio: undefined,
       ...CROSS_MODAL_DEFAULTS,
       graph_signals: false,
+      ...CR_DISABLED_DEFAULT,
+      contextual_retrieval: 'none',
     });
   });
 
@@ -88,6 +95,8 @@ describe('SEARCH_MODES + MODE_BUNDLES canonical shape', () => {
       floor_ratio: undefined,
       ...CROSS_MODAL_DEFAULTS,
       graph_signals: true,
+      ...CR_DISABLED_DEFAULT,
+      contextual_retrieval: 'title',
     });
   });
 
@@ -108,6 +117,8 @@ describe('SEARCH_MODES + MODE_BUNDLES canonical shape', () => {
       floor_ratio: undefined,
       ...CROSS_MODAL_DEFAULTS,
       graph_signals: true,
+      ...CR_DISABLED_DEFAULT,
+      contextual_retrieval: 'per_chunk_synopsis',
     });
   });
 
@@ -294,9 +305,16 @@ describe('knobsHash determinism + cross-mode separation (CDX-4)', () => {
     // all appended per CDX2-F13 append-only convention so a text-mode cache
     // hit can never silently serve to an image-mode caller, and a query
     // against `embedding_voyage` never shares a cache row with `embedding`.
-    // v0.40.4 bumped 3→4 to fold graph_signals so a graph-on cache write
-    // cannot be served to a graph-off lookup.
-    expect(KNOBS_HASH_VERSION).toBe(4);
+    // v0.40.4 (salem) + v0.39 T21 (master): bumped 3→4 to fold graph_signals
+    // (so a graph-on cache write cannot be served to a graph-off lookup) AND
+    // schema-pack hash fields (pack name + pack version, so cross-pack
+    // contamination is structurally impossible).
+    // v0.40.3.0 (D8): bumped 4→5 to add contextual_retrieval (CRMode) and
+    // contextual_retrieval_disabled (kill switch). A query against a brain
+    // on tokenmax (per-chunk synopsis) must not be served from a cache row
+    // written when the brain was on balanced (title-only) — different
+    // embedding spaces. Sequenced behind salem's v=4 graph-signals work.
+    expect(KNOBS_HASH_VERSION).toBe(5);
   });
 
   test('T1 (codex): floor_ratio set vs unset produces DIFFERENT hashes (cache contamination prevention)', () => {

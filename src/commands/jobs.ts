@@ -1097,6 +1097,28 @@ export async function registerBuiltinHandlers(worker: MinionWorker, engine: Brai
     return result;
   });
 
+  // v0.40.3.0 T8b: RemediationStep consumer handlers. Thin wrappers
+  // around already-shipping CLI commands so doctor --remediate can
+  // submit them as Minion jobs. NOT in PROTECTED_JOB_NAMES (no shell
+  // exec, no cost spike, MCP-safe).
+  worker.register('lint-fix', async (job) => {
+    const { runLintCore } = await import('./lint.ts');
+    const target = typeof job.data.dir === 'string' ? job.data.dir : '.';
+    return await runLintCore({ target, fix: true, dryRun: false });
+  });
+
+  worker.register('integrity-auto', async () => {
+    const { runIntegrity } = await import('./integrity.ts');
+    await runIntegrity(['auto']);
+    return { ok: true };
+  });
+
+  worker.register('sync-retry-failed', async () => {
+    const { runSync } = await import('./sync.ts');
+    await runSync(engine, ['--retry-failed']);
+    return { ok: true };
+  });
+
   worker.register('import', async (job) => {
     // import.ts Core extraction deferred to v0.12.0 (import has parallel
     // workers + checkpointing). Keep the CLI wrapper call but note the
@@ -1140,6 +1162,19 @@ export async function registerBuiltinHandlers(worker: MinionWorker, engine: Brai
   // renewal callback and the stalled-sweeper kills the job.
   //
   // Phase failures surface as report.status='partial' (via runCycle's
+  // v0.40.3.0: per-page contextual retrieval re-embed handler. PROTECTED
+  // name (src/core/minions/protected-names.ts) — MCP/OAuth callers can't
+  // submit; only trusted local callers (config.ts mode-switch hook,
+  // reindex sweep, doctor --remediate). Composes the global Haiku rate-
+  // leaser per D26 P0-3 + delegates to contextual-retrieval-service.ts
+  // for the two-phase build.
+  {
+    const { makeContextualReindexHandler } = await import(
+      '../core/minions/handlers/contextual-reindex-per-chunk.ts'
+    );
+    worker.register('contextual_reindex_per_chunk', makeContextualReindexHandler({ engine }));
+  }
+
   // derivation); the handler returns { partial, status, report } so
   // `gbrain jobs get <id>` shows the full structured report. Does NOT
   // throw on partial: a flaky phase must not block every future cycle.

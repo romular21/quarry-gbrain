@@ -107,6 +107,165 @@ This wave grew significantly through review (boil-the-lakes orientation):
 - New shared primitive `src/core/audit/audit-writer.ts` is the way to add JSONL audits going forward. Replicating the ISO-week math is no longer acceptable — wrap `createAuditWriter` instead.
 - `pairedBootstrapPValue` is exported from `test/e2e/graph-signals-eval.test.ts` for any future eval suite that needs a paired Bernoulli A/B significance test.
 - Five TODOs filed for v0.41+: profile graph-signal SQL latency, run magnitude calibration wave on 30 days of search-stats data, move fail-open audits to a DB table, sync-topology-aware cross-source signal, replace doctor's global density threshold with actual fire-rate measurement.
+## [0.40.3.0] - 2026-05-22
+
+**Your search now understands what each chunk is about — AND its cached results expire the moment a page changes.**
+
+Two big things changed in this release. The first is the contextual retrieval cathedral that was originally in v0.40.3.0: every chunk gets the page title wrapped around it before going into the search index, so a sentence about "raised $3M" now remembers it came from "Acme Corp Series A" instead of competing with every other fundraise mention in your brain. Power users on tokenmax mode get the premium tier — a fresh per-chunk summary from Claude Haiku — which Anthropic's published research showed reduces retrieval failure rate 35-49% on document-heavy benchmarks.
+
+The second thing is cache invalidation that's actually correct. When the agent runs the same search twice in a row, the second call returns from cache in microseconds instead of running keyword search + vector search + reranking again. But before this release, the cache had no way to know if a page had been edited between the two calls — it just trusted itself for an hour (the TTL). So if you edited a page and then searched, the agent silently served the OLD version until the TTL expired. This release adds a two-layer gate: a cheap corpus-wide "has anything been written?" check (one indexed integer compare per cache hit) AND a per-result "are these specific pages still at their stored generation?" check. Either layer firing invalidates the row. Pre-upgrade cache rows still serve via a backward-compat path until they age out naturally — no cache stampede on upgrade.
+
+Plus four CLI improvements that close gaps in the v0.40.3 deferral list:
+- `gbrain mounts enable/disable <id>` toggles a mounted brain without removing it.
+- `gbrain mounts trust-frontmatter <id>` lets a mounted team brain's per-page frontmatter override the source's default contextual retrieval mode. Off by default — mounts opt in explicitly.
+- `gbrain sources set-cr-mode <id> <none|title|per_chunk_synopsis>` writes per-source overrides. Missing source ID fails loudly with a paste-ready `gbrain sources list` hint.
+- `gbrain config set search.mode tokenmax` now shows a banner explaining what changed (and the per-chunk Haiku backfill cost) and offers to submit `gbrain reindex --markdown` as a Minion job if a worker is alive. Non-TTY callers get a paste-ready hint to stderr instead of a silent stall.
+
+And one generic refactor: doctor's `Remediation` type lifted into its own `RemediationStep` module so other doctor checks can emit structured fix steps. The integrity and sync_failures checks now emit RemediationSteps too — `gbrain doctor --remediation-plan` and `--remediate` walk them automatically.
+
+### How to turn it on
+
+`gbrain upgrade` does the whole thing automatically. Post-upgrade prompt fires, explains the re-embed cost in plain text, gives you a 10-second window to abort, and re-embeds every markdown page through the new title-tier wrapper.
+
+To opt up to per-chunk Haiku synopsis:
+```bash
+gbrain config set search.mode tokenmax
+# (banner fires; on TTY + active worker it offers to submit reindex as a Minion job)
+gbrain reindex --markdown   # or pick that up after the prompt
+```
+
+To opt out entirely if quality regresses (soft kill switch — wrapped vectors stay in DB but new embeds skip the wrapper):
+```bash
+gbrain config set search.contextual_retrieval_disabled true
+```
+
+For mounted team brains:
+```bash
+gbrain mounts trust-frontmatter team-brain-id  # opt this mount into frontmatter overrides
+gbrain mounts disable team-brain-id            # toggle off without removing
+```
+
+### Tier ladder — what each search mode gets
+
+| Mode | Wrapper | Per-query cost | One-time backfill |
+|------|---------|----------------|-------------------|
+| `conservative` | none | $0 | $0 |
+| `balanced` (default) | title-only prefix | $0 (string concat) | $0 (current text-embedding-3 calls reused) |
+| `tokenmax` | per-chunk Haiku synopsis | $0 (one-time only) | ~$1-5 per 10K pages, ~17h at Anthropic's default Haiku rate limit |
+
+The wrapper is asymmetric: chunks get the context prefix when going into the embed call, but queries stay clean. Voyage + ZeroEntropy distinguish `inputType: 'query'` from `'document'` natively, so this works correctly; OpenAI symmetric users still benefit from document-side orientation.
+
+### What you'd see in a concrete example
+
+A page titled "Acme Corp Series A" with a chunk that reads `raised $3M from Fund A in 2024`:
+
+| Stored in DB (`content_chunks.chunk_text`) | What the embedder saw |
+|--------------------------------------------|----------------------|
+| `raised $3M from Fund A in 2024` (canonical, unchanged) | `<context>Acme Corp Series A\n</context>\nraised $3M from Fund A in 2024` |
+
+Search snippets, full-text search, the reranker, and debug output all read the canonical chunk_text. Only the embedding vector reflects the wrapped form. This separation is the load-bearing invariant of the wave (D20-T1).
+
+### Cache invalidation — how the two-layer gate works
+
+```
+WRITE PATH (any pages mutation)
+  INSERT or UPDATE pages → trigger fires
+    INSERT → row gets generation = MAX(generation) + 1
+    UPDATE → if (body/title/type/page_kind/content_hash/etc IS DISTINCT FROM)
+             NEW.generation = OLD.generation + 1
+
+STORE PATH (query-cache.ts:store)
+  SELECT id, generation FROM pages WHERE id = ANY($result_page_ids)
+  + SELECT MAX(generation) FROM pages
+  → stamp BOTH per-page snapshot AND corpus bookmark on the cache row
+
+LOOKUP PATH (query-cache.ts:lookup) — TWO-LAYER
+  Layer 1 (cheap): (SELECT MAX(generation) FROM pages) <= stored_bookmark
+                   O(log N) via pages_generation_idx
+  Layer 2 (per-page): jsonb_each + LEFT JOIN pages
+                      page deleted → invalidate
+                      page bumped → invalidate
+                      pre-v0.40.3.0 rows with empty {} snapshot → vacuously valid
+```
+
+### Things to watch
+
+- **Migration v90 + v91**. v90 (renumbered from v0.40.3.0's original v81 on master merge) adds the 5 contextual retrieval columns. v91 adds `pages.generation BIGINT`, `query_cache.max_generation_at_store BIGINT`, the trigger, and the `pages_generation_idx` btree. All NULL-tolerant or have safe defaults; existing rows keep working unchanged.
+- **KNOBS_HASH_VERSION 3 → 5**. Bumped past 4 (claimed by salem's v0.40.4 graph signals work) to keep cache-row shape collisions impossible across sibling waves. Existing v=3 cache rows become unreachable on first re-query after upgrade (one-time miss spike).
+- **Chunker version 2 → 3** signals the post-upgrade reembed sweep that every markdown page needs to be re-embedded through the new wrapper path. Chunk boundaries themselves are unchanged from v2.
+- **Race fix folded in (D24)**: the long-standing v0.35.x NULL→non-NULL upsert race between concurrent embed workers is finally closed. Two writers racing on the same chunk now let the fresher `embedded_at` win instead of last-writer-wins.
+
+### What we caught and fixed before merging
+
+The wave went through two rounds of /plan-eng-review and one /codex outside-voice review on top of the original v0.40.3 codex pass. The fresh codex round caught EIGHT genuine bugs in the deltas, all absorbed before code landed:
+
+- **Trigger allow-list too narrow.** Original plan watched 6 columns (body/frontmatter/compiled_truth/timeline/deleted_at/contextual_retrieval_mode). Codex pointed out that title, type, page_kind, and corpus_generation are all user-visible — silently NOT bumping on those would serve stale search results for title edits. Widened to 10 columns including content_hash as the canonical "content changed" signal.
+- **BEFORE UPDATE missed INSERTs.** The original trigger fired BEFORE UPDATE only. The v0.38 ingest_capture handler uses `INSERT ... ON CONFLICT DO UPDATE`, so fresh slugs took the INSERT path and silently never bumped MAX(generation). Cache rows stored before a new page existed would never invalidate. Fixed: trigger now fires BEFORE INSERT OR UPDATE, and the INSERT branch sets generation = COALESCE(MAX, 0) + 1 explicitly.
+- **Migration version collision risk.** Master shipped v82-v88 across v0.38/v0.39 while v0.40.3.0 was off-master. Our v81 (contextual_retrieval_columns) collided with master's. Plan: rename to v89. Codex caught that `garrytan/v0.40.2.0-trajectory-routing` already reserved v89 for `facts_event_type_column`. Re-renumbered to v90; new trigger work at v91.
+- **KNOBS_HASH_VERSION collision with salem.** Both our wave and salem's v0.40.4 graph-signals wave wanted v=4. Per D8 we bumped to v=5 so cache rows from either wave can't accidentally serve the other.
+- **D3 regression test too weak.** Original plan asserted ingest_capture bumps generation on existing slugs only. Codex pointed out the INSERT path (codex #4) ALSO needs explicit coverage. T11 test now exercises both paths + idempotent re-capture.
+- **v0.38 provenance columns.** ingested_via/ingested_at/source_uri/source_kind are returned by ingest_capture but not written to pages. If a future master change wires them into putPage, the trigger allow-list would silently miss content edits via those columns. Verified at implementation time; allow-list left at the current 10 columns.
+- **Index shape wrong.** Original plan said `(generation DESC)`. Codex pointed out plain `(generation)` btree is backward-scannable for MAX. Simplified.
+- **One missing master commit.** Plan said 5 commits; master was actually 6 commits ahead via v0.39.2.0 autopilot/cycle-lock wave. Adjusted Phase 1 expectations.
+
+### Itemized changes
+
+- **Migration v90** (`src/core/migrate.ts`): renamed from v0.40.3.0's original v81 to clear master's v82-v88 reservations. 5 additive columns wiring the three-tier wrapper ladder.
+- **Migration v91** (NEW): `pages.generation BIGINT` + `query_cache.max_generation_at_store BIGINT` + `bump_page_generation_fn` trigger (BEFORE INSERT OR UPDATE with 10-column content allow-list) + `pages_generation_idx` btree via CONCURRENTLY on Postgres / plain CREATE INDEX on PGLite. `transaction: false` matches the v14 pages_updated_at_index pattern.
+- **Schema mirrors** (`src/schema.sql`, `src/core/pglite-schema.ts`): pages + sources + trigger DDL + index updated.
+- **Bootstrap probes** (`src/core/{pglite,postgres}-engine.ts`): forward-reference checks added for all 5 v90 columns + pages.generation per the established v0.22.6.1 pattern. `test/schema-bootstrap-coverage.test.ts` REQUIRED_BOOTSTRAP_COVERAGE extended.
+- **New pure modules** (`src/core/`): `remediation-step.ts` (canonical RemediationStep type + makeRemediationStep factory + canonical-JSON idempotency key per codex D12 Bug 2), `search/query-cache-gate.ts` (two-layer cache gate helpers + SQL fragment), `search/mode-switch-ux.ts` (transition summarizer + worker probe + Minion submission).
+- **query-cache.ts** lookup() / store() rewrites: two-layer gate embedded in the lookup SQL; store() captures the page_generations snapshot + max_generation_at_store bookmark via the new buildPageGenerationsSnapshot helper. KNOBS_HASH_VERSION 4 → 5 (per D8 sequencing behind salem's pending v=4).
+- **config.ts hook**: `gbrain config set search.mode <X>` captures the OLD mode, calls setConfig, then invokes runModeSwitchUx with TTY + non-TTY + GBRAIN_NO_MODE_SWITCH_UX awareness. Honors `--yes` for automation. Best-effort: UX failures never break a config write that already persisted.
+- **mounts.ts**: 4 new verbs (enable / disable / trust-frontmatter / untrust-frontmatter) sharing the runSetMountFlag helper. MountEntry interface extended with `trust_frontmatter_overrides?: boolean` (default false; mounts opt in explicitly). loadMounts projection threads the field through. GBRAIN_MOUNTS_PATH env override added to both `mounts.ts` and `brain-registry.ts` getMountsPath() so tests don't fight libuv's cached homedir().
+- **sources.ts**: `set-cr-mode <id> <mode>` verb with isCRMode validation, "unset"/"default"/"" as the clear path, missing-source loud rejection with paste-ready `gbrain sources list` hint (closes the idempotent-pebble Failure Modes critical gap).
+- **brain-score-recommendations.ts**: Remediation lifted into the new src/core/remediation-step.ts module. Re-exports + back-compat alias preserved so existing callers keep compiling.
+- **doctor.ts**: Check.remediation field typed to RemediationStep[]. integrity + sync_failures checks emit RemediationSteps via makeRemediationStep when the warn fires. sync-skip-failed deliberately NOT emitted per codex D12 Bug 3 (auto-skip hides data loss).
+- **jobs.ts**: 3 new Minion handlers registered (lint-fix, integrity-auto, sync-retry-failed). Thin wrappers around already-shipping CLI commands; NOT in PROTECTED_JOB_NAMES (idempotent, no shell exec, MCP-safe).
+- **import-file.ts**: wraps chunks at embed time (D20-T1 separation), stamps the two CR-state columns alongside putPage.
+- **Race fix** (D24): `postgres-engine.ts` + `pglite-engine.ts` upsertChunks use `embedded_at` to break NULL→non-NULL ties. Closes the long-standing v0.35.x TODO.
+- **Mode bundle field** (`src/core/search/mode.ts`): `contextual_retrieval: CRMode` per tier + `contextual_retrieval_disabled` kill switch.
+
+### For contributors
+
+7 new test files (1093 LOC) + 5 extended test files:
+- `test/query-cache-gate.test.ts` (15 cases: pure validator branches + PGLite-backed snapshot builder + SQL shape regression).
+- `test/mode-switch-ux.test.ts` (18 cases: 5-cell transition matrix + 3-branch worker probe + 6-case content-stable idempotency-key invariance).
+- `test/mounts-cli.test.ts` (5 new cases: enable/disable cycle, trust/untrust cycle, missing-mount rejection, host rejection, idempotent enable).
+- `test/sources-set-cr-mode.test.ts` (10 cases: happy path × 3 modes, unset path × 2, invalid mode rejection, missing source rejection, missing args, round-trip preserves other fields).
+- `test/remediation-step.test.ts` (17 cases: canonical-JSON determinism, idempotency_key shape + invariance, makeRemediationStep factory, back-compat alias).
+- `test/e2e/cache-gate-pglite.test.ts` (6 cases: store→HIT, content UPDATE→MISS, INSERT new page→HIT codex #4 case, legacy row→HIT IRON-RULE, soft-delete→MISS, multi-page partial bump→MISS).
+- `test/e2e/capture-generation-regression.test.ts` (3 cases: INSERT path bumps MAX, UPDATE path bumps generation, idempotent re-capture does NOT bump).
+
+## To take advantage of v0.40.3.0
+
+`gbrain upgrade` should do this automatically. If it didn't, or if `gbrain doctor`
+warns about a partial migration:
+
+1. **Run the orchestrator manually:**
+   ```bash
+   gbrain apply-migrations --yes
+   ```
+2. **Your agent reads `skills/migrations/v0.40.3.0.md` the next time you interact with it.**
+   The migration is mostly mechanical (schema + bootstrap probes); no agent-side action required beyond the optional `--mode tokenmax` opt-in.
+3. **Verify the outcome:**
+   ```bash
+   gbrain doctor
+   gbrain search "your favorite query"  # should hit cache on the 2nd run
+   ```
+4. **If you want to opt up to tokenmax (per-chunk Haiku synopsis):**
+   ```bash
+   gbrain config set search.mode tokenmax
+   # Mode-switch banner fires with cost preview + offers reindex submission.
+   ```
+5. **If any step fails or the numbers look wrong,** please file an issue:
+   https://github.com/garrytan/gbrain/issues with:
+   - output of `gbrain doctor`
+   - contents of `~/.gbrain/upgrade-errors.jsonl` if it exists
+   - which step broke
+
+   This feedback loop is how the gbrain maintainers find fragile upgrade paths. Thank you.
+
 ## [0.40.2.0] - 2026-05-22
 
 **gbrain now uses the typed-claim timeline it's been quietly building to ground answers about what changed and when.** Ask `gbrain think` "when did Marco last switch jobs" or "what was the ARR in March" and the answer comes back rooted in a real chronological timeline of the metric facts your brain already extracted via the `extract_facts` cycle phase. The feature is on by default; flip `think.trajectory_enabled=false` to opt out.
@@ -177,7 +336,6 @@ The same plumbing lands in the LongMemEval benchmark, with a methodology change 
 ### Plan + reviews
 
 Plan file at `~/.claude/plans/system-instruction-you-are-working-crystalline-owl.md` carries the full design rationale, the CEO/Eng/Codex review history (3 review passes, all CLEARED), the measurement plan (3 seeds per condition + paired-bootstrap CI), and the hand-verification gate list. Codex flagged 18 findings during outside-voice review; 6 load-bearing ones folded as design decisions (alias-map wording, `resolveEntitySlugWithSource` resolution_source signal, prompt-placement preserving both calibration AND default ordering, INJECTION_PATTERNS extension for `</trajectory>`, 5s findTrajectory timeout + 10s extractor timeout, doctor check deferred to v0.40.1+, real-LLM spot-check added, success metric broadened). The benchmark methodology contamination was the load-bearing decision — accepted with explicit CHANGELOG + JSON-envelope disclosure.
-
 
 
 ## [0.40.1.0] - 2026-05-22

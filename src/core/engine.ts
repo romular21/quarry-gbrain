@@ -1500,6 +1500,30 @@ export interface BrainEngine {
   ): Promise<void>;
 
   /**
+   * v0.40.3.0 — narrow UPDATE that stamps the two CR-state columns
+   * (`contextual_retrieval_mode`, `corpus_generation`) plus
+   * `updated_at = now()` and nothing else.
+   *
+   * Used by `src/core/contextual-retrieval-service.ts:reembedPageWithContextualRetrieval`
+   * at the end of its PHASE 2 transaction. Why narrow instead of routing
+   * through `putPage`: stamping the CR state alone shouldn't trigger the
+   * full page-version snapshot machinery (createVersion fires on every
+   * putPage with an existing row, which would bloat page_versions on every
+   * tier upgrade).
+   *
+   * Skips soft-deleted rows (deleted_at filter). Idempotent — same args
+   * twice produces the same row state. Both columns are NULL-tolerant
+   * (callers pass NULL for `corpusGeneration` only on the 'none' tier
+   * path; 'title' and 'per_chunk_synopsis' always supply a hash).
+   */
+  updatePageContextualRetrievalState(
+    slug: string,
+    sourceId: string,
+    mode: string,
+    corpusGeneration: string | null,
+  ): Promise<void>;
+
+  /**
    * v0.35.5 — lossless DB-side migration of fact rows from one slug to
    * another within a single source. UPDATEs `entity_slug` and
    * `source_markdown_slug` on every active fact row whose
