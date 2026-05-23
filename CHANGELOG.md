@@ -2,7 +2,7 @@
 
 All notable changes to GBrain will be documented in this file.
 
-## [0.39.3.0] - 2026-05-22
+## [0.39.2.0] - 2026-05-22
 
 **Your federated brain refreshes all its sources in parallel now, not one at a time.**
 
@@ -180,7 +180,7 @@ in your check output. Federated-brain operators will see new
 `fanout_summary` events in the autopilot stream and can tune
 `autopilot.fanout_max_per_tick` if desired.
 
-## To take advantage of v0.39.3.0
+## To take advantage of v0.39.2.0
 
 `gbrain upgrade` should do this automatically. If it didn't, or if
 `gbrain doctor` warns about anything:
