@@ -182,6 +182,20 @@ CREATE INDEX IF NOT EXISTS idx_links_to ON links(to_page_id);
 CREATE INDEX IF NOT EXISTS idx_links_source ON links(link_source);
 CREATE INDEX IF NOT EXISTS idx_links_origin ON links(origin_page_id);
 
+-- v0.38: page_links is the alias the engine queries use (pglite-engine.ts +
+-- postgres-engine.ts both JOIN page_links pl ON pl.to_page_id = p.id). The
+-- alias predates the table-name standardization; the canonical table is
+-- links. Brainstorm domain-bank connection_count tiebreaker and the
+-- doctor link-density score read through this view.
+--
+-- The projection is intentionally NARROW (id, from_page_id, to_page_id only).
+-- Engine queries only reference pl.id (via COUNT(*)) and pl.to_page_id.
+-- Including link_source / origin_page_id / etc. in the view would couple
+-- the alias to columns that didn't exist in pre-v0.13 brains AND would
+-- block ALTER TABLE DROP COLUMN on those columns during upgrades.
+CREATE OR REPLACE VIEW page_links AS
+  SELECT id, from_page_id, to_page_id FROM links;
+
 -- ============================================================
 -- tags
 -- ============================================================
@@ -421,20 +435,27 @@ CREATE INDEX IF NOT EXISTS idx_subagent_messages_job ON subagent_messages (job_i
 CREATE INDEX IF NOT EXISTS idx_subagent_messages_provider ON subagent_messages (job_id, provider_id);
 
 CREATE TABLE IF NOT EXISTS subagent_tool_executions (
-  id              BIGSERIAL PRIMARY KEY,
-  job_id          BIGINT      NOT NULL REFERENCES minion_jobs(id) ON DELETE CASCADE,
-  message_idx     INTEGER     NOT NULL,
-  tool_use_id     TEXT        NOT NULL,
-  tool_name       TEXT        NOT NULL,
-  input           JSONB       NOT NULL,
-  status          TEXT        NOT NULL,
-  output          JSONB,
-  error           TEXT,
-  schema_version  INTEGER     NOT NULL DEFAULT 1,
-  provider_id     TEXT,
-  started_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-  ended_at        TIMESTAMPTZ,
+  id                  BIGSERIAL PRIMARY KEY,
+  job_id              BIGINT      NOT NULL REFERENCES minion_jobs(id) ON DELETE CASCADE,
+  message_idx         INTEGER     NOT NULL,
+  tool_use_id         TEXT        NOT NULL,
+  tool_name           TEXT        NOT NULL,
+  input               JSONB       NOT NULL,
+  status              TEXT        NOT NULL,
+  output              JSONB,
+  error               TEXT,
+  schema_version      INTEGER     NOT NULL DEFAULT 1,
+  provider_id         TEXT,
+  -- v0.38 D11: gbrain-owned stable IDs (ordinal assigned at first observation;
+  -- gbrain_tool_use_id is uuid v7). Reconciliation on crash-replay uses
+  -- (job_id, message_idx, ordinal) as the unique key. Legacy rows (pre-v82)
+  -- have ordinal=NULL and resolve via the read-time D5 shim.
+  ordinal             INTEGER,
+  gbrain_tool_use_id  UUID,
+  started_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+  ended_at            TIMESTAMPTZ,
   CONSTRAINT uniq_subagent_tools_use_id UNIQUE (job_id, tool_use_id),
+  CONSTRAINT subagent_tool_executions_stable_id UNIQUE (job_id, message_idx, ordinal),
   CONSTRAINT chk_subagent_tools_status CHECK (status IN ('pending','complete','failed'))
 );
 CREATE INDEX IF NOT EXISTS idx_subagent_tools_job ON subagent_tool_executions (job_id, status);
@@ -745,6 +766,14 @@ CREATE TABLE IF NOT EXISTS oauth_clients (
   deleted_at              TIMESTAMPTZ,
   source_id               TEXT REFERENCES sources(id) ON DELETE RESTRICT,
   federated_read          TEXT[] NOT NULL DEFAULT '{}',
+  -- v0.38 Slice 2 + 3: per-OAuth-client budget cap (v84) + agent binding (v85).
+  -- bound_* columns are NULL on legacy clients (no agent scope by default).
+  budget_usd_per_day      NUMERIC(10, 2) NULL,
+  bound_tools             TEXT[] NULL,
+  bound_source_id         TEXT NULL,
+  bound_brain_id          TEXT NULL,
+  bound_slug_prefixes     TEXT[] NULL,
+  bound_max_concurrent    INTEGER NOT NULL DEFAULT 1,
   created_at              TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 -- v0.34.1 (#861, D13 + #876): source_id is the OAuth client's write-source

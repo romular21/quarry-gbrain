@@ -1,5 +1,96 @@
 # TODOS
 
+## v0.40.1.0 Track D follow-ups (v0.41+)
+
+- [ ] **v0.41+: contributor-mode CI capture for BrainBench-Real replay gate.**
+  v0.40.1.0 Track D shipped the hermetic qrels gate (`test/eval-replay-gate.test.ts`)
+  as the structurally-correct replacement for the original "replay against captured
+  `eval_candidates` baseline" design. Codex outside-voice audit caught three fatal
+  flaws with the replay-against-captured-baseline approach: (a) `scripts/select-e2e.ts`
+  is local-only — `.github/workflows/test.yml` + `e2e.yml` hit fixed file lists,
+  so a diff-aware selector entry would gate nothing on GitHub PRs;
+  (b) `gbrain eval export` reads `eval_candidates` rows which only populate when
+  ops fire through the operation layer with `GBRAIN_CONTRIBUTOR_MODE=1` capture —
+  PGLite tests seeded via direct `engine.put*()` produce zero captured rows;
+  (c) `gbrain eval replay` re-embeds query text via `gateway.embedQuery()` which
+  needs an API key CI doesn't have. Real-query dogfooding is still valuable —
+  synthetic qrels test the structural ranking, real captures test what users
+  actually search for. To restore the replay-based gate properly: (1) provision
+  a CI secret for an embedding key (OpenAI text-embedding-3-small is the
+  cheapest); (2) build a nightly capture pipeline that runs
+  `GBRAIN_CONTRIBUTOR_MODE=1 gbrain eval export --tool query` against a seeded
+  brain corpus; (3) commit-automate the resulting NDJSON into
+  `test/fixtures/eval-baselines/` with a "Why:" justification line; (4) write
+  a new gate test that calls `gbrain eval replay --against <fixture>` and asserts
+  on `mean_jaccard`, `top1_stability_rate`, drops the latency assert (CI runners
+  vary too much). Estimate: ~2 weeks. Filed during v0.40.1.0 Track D
+  /plan-eng-review (see `~/.claude/plans/system-instruction-you-are-working-whimsical-acorn.md`).
+
+- [ ] **v0.41+: Wire the nightly quality probe into autopilot scheduling.**
+  v0.40.1.0 Track D shipped the phase (`src/core/cycle/nightly-quality-probe.ts`),
+  the audit JSONL (`src/core/audit-quality-probe.ts`), the doctor check
+  (`nightly_quality_probe_health` in doctor.ts), and the 10-question
+  placeholder fixture. What's NOT yet wired: `src/commands/autopilot.ts`
+  doesn't yet invoke `runNightlyQualityProbe(deps)` on its 24h cadence —
+  the phase is callable in isolation (good for testing) but no scheduled
+  loop calls it. To finish: add a phase trigger to the autopilot cycle loop
+  that calls the probe with concrete deps wiring (`isEnabled`,
+  `hasEmbeddingProvider`, `resolveMaxUsd`, `resolveRepoRoot`, real
+  `runLongMemEval` / `runCrossModalBatch` invocations via subprocess or
+  direct function call). Honor `autopilot.nightly_quality_probe.enabled`
+  config gate (already in doctor's read-side; needs autopilot read-side).
+  Doctor surface is already in place to show outcomes; just need the
+  scheduling lane. Estimate: ~3 hours.
+
+## v0.39.3.0 smoke-test wave — deferred follow-ups (v0.39.4 / v0.40)
+
+- [ ] **v0.40: SQL-shape rewrite of `listPrefixSampledPages` for PgBouncer transaction-mode compatibility.** WARN-10 root cause from the v0.38.0.0 smoke test: brainstorm + lsd consistently exceed Postgres `statement_timeout` (often PgBouncer-imposed) on the prefix-stratified domain bank query when the brain has >10K pages spread across many prefixes. v0.39.3.0 ships diagnostic surfacing only (the orchestrator wrap classifies SQLSTATE 57014 into a `StructuredAgentError` with a friendly hint). Real fix: per-prefix limit pushdown, embeddings prefetch, or breaking the single big query into a series of small ones across an explicit cursor. Plan: `~/.claude/plans/system-instruction-you-are-working-async-popcorn.md` (Phase 5, WARN-10 row). Owner: open.
+
+- [ ] **v0.40: magic-byte allowlist for `gbrain capture` binary file detection.** v0.39.3.0 (Phase 3c, CV10) ships a first-8KB NUL-byte scan that catches typical binaries (executables, archives, most image formats). Known gap per CV10-B: a PNG with no NUL byte in its first 8KB slips through. Production-grade detection needs a magic-byte allowlist (PNG/JPEG/GIF/PDF/ZIP signatures). Implement in `src/commands/capture.ts:detectBinaryNullByte` (rename to `detectBinaryInput`) with a small `BINARY_MAGIC_BYTES` table. Reuse the same `assertSourceExists`-style friendly error pattern; reject before UTF-8 decode mangles the bytes. Tests in `test/capture-binary-guard.test.ts` should add cases for the PNG-without-NUL boundary.
+
+- [ ] **v0.40: facts:absorb root-cause investigation.** v0.39.3.0 (Phase 4c, CV13) suppresses the per-capture `[facts:absorb] failed to log gateway_error for inbox/...: No database connection` noise AND prints a first-occurrence stack trace so the v0.40 fix knows where to look. The actual fix is one of: (a) thread the connected engine through the facts pipeline so it doesn't open its own handle; (b) no-op the absorb-log when called from a CLI context where the doctor health check isn't the consumer; (c) make the facts subsystem connection-aware and queue retries. The stack trace from `src/core/facts/absorb-log.ts:writeFactsAbsorbLog`'s first-occurrence info-log is the input.
+
+- [ ] **v0.40: `--source-kind` override flag for `gbrain capture`.** v0.39.3.0 (Phase 3c, CV3) locked source_kind to `'capture-cli'` for capture invocations (the deferred CV3-B alternative). Real use case for the override: Apple Shortcuts / Zapier-style automations that shell out to `gbrain capture` and want their pages labeled `apple-shortcut` or `zapier` in the audit trail. Implementation: add a small flag with an allowlist (similar to migration v81's closed taxonomy: `capture-cli | apple-shortcut | zapier | <skillpack-kind>`); validate at parse time; CV6 remote-spoofing guard still applies (server stamps `mcp:put_page` regardless when `ctx.remote !== false`).
+
+- [ ] **v0.40: route `gbrain capture` through `ingest_capture` Minion handler instead of put_page direct.** v0.39.3.0 (Phase 3a, A1) extended put_page with provenance params as the smallest diff. The cleaner architecture is the ingest_capture Minion handler shape that migration v81's comment already describes ("populated by the ingest_capture Minion handler"). This is a v0.40 architectural shift: capture submits an `ingest_capture` job → handler computes provenance + writes via put_page → result returns to capture. Adds queue latency (Minion job submit + poll) to the sync capture path; needs careful UX consideration (synchronous receipt vs async job_id). The current put_page extension stays back-compat after the migration.
+
+- [ ] **v0.40: provenance-history table for full ingestion event log.** v0.39.3.0's CV12 `COALESCE-preserve UPDATE` keeps the FIRST ingestion source as the audit trail (first-write-wins). For deeper audit cases ("show me every time this page was re-ingested + by which channel"), a separate `pages_provenance_events` table keyed on `(page_id, ingested_at)` would preserve every event. Out of scope for v0.39.x; v0.40+ if/when the audit case grows beyond "first ingestion source."
+
+- [ ] **v0.40+: ingest webhook provenance pass-through.** v0.39.3.0 CV6 closed the spoofing surface by IGNORING client-supplied provenance params for remote callers (ctx.remote !== false). The webhook path stamps server-side `webhook` provenance anyway, so today's behavior is unchanged. When trusted webhook integrations (a service running in the same trust domain as the server) need to declare their own source_kind (`linear`, `notion`, etc.), build a separate trusted-call surface for them — NOT by reopening put_page's wire schema. Possibilities: signed JWT with `provenance_authority: true` claim, or a different Minion job type `ingest_authoritative` that bypasses the CV6 guard.
+
+
+## v0.39.1+ schema-cathedral follow-ups (filed during v0.39.0.0 ship)
+
+- [ ] **T18 follow-through — DELETE `skills/_brain-filing-rules.{md,json}`.** v0.39.0.0 shipped step (a) of the 4-step deprecation sequence: `gbrain schema show --as-filing-rules` emits the JSON shape the legacy file held. v0.39.1 ships steps (b) + (c) + (d): migrate `filing-audit.ts:79`, `synthesize.ts:619`, `patterns.ts:305`, `check-resolvable.ts:196+:226` to consume `gbrain schema show --as-filing-rules` output; update 5 test files (filing-audit.test.ts, check-resolvable.test.ts, dry-fix.test.ts, resolver.test.ts, cycle-patterns.test.ts); then DELETE the two files. Codex finding #3 from /plan-eng-review made this load-bearing — premature deletion makes protected synthesize/patterns phases fail with NO_ALLOWLIST. Sequencing matters.
+- [ ] **T19 follow-through — per-source pack federation across mounts.** v0.39.0.0 ships the correct REJECTION posture (`SchemaPackTrustGateError` when sources resolve to divergent packs). v0.40 ships the true per-source closure via `buildPerSourceBindings` + `buildSourceClosureCte` (engine already provides; the read-path callers need to thread the per-source pack identity through the SQL generation step). Reference: codex finding #2 from /plan-eng-review.
+- [ ] **T16 follow-through — hermetic eval-schema-authoring CLI harness.** v0.39.0.0 ships the aggregator (`aggregateVerdict`) + scaffold; v0.39.1 wires the in-process PGLite engine + fixture brain replay (3 fixtures: 1 hand-curated `notion-refugee` + 2 synthetic via faker per D6(eng)). Pattern: mirror `src/eval/longmemeval/harness.ts`.
+- [ ] **T1.5 follow-through — wire `whoknows` / `find_experts` / `enrichment-service` / `facts/eligibility` to consume pack-aware type sets.** v0.39.0.0 added the seam (`activePack` parameter threaded through parseMarkdown/import/sync). The runtime sites that compute their type filter still use the v0.38 hardcoded constants. v0.39.1 migrates each call site to read from `loadActivePackForOp(ctx)` + use `expertTypesFromPack` / `extractableTypesFromPack` (helpers already exist in `src/core/schema-pack/`). Per the T19 closure fix, this is now safe to wire (federated_read with divergent packs throws permission_denied at the load step).
+- [ ] **D14 thesis retro — authoring vs derivation framing.** v0.39.0.0 ships the cathedral with 6 verbs marked experimental-tier + T15 schema-events audit + T23 `gbrain schema usage` for measurement. v0.40+ retro reads 60-90 days of usage telemetry and decides which experimental verbs to deprecate per codex's derivation-thesis structural argument. Pass condition: each verb gets >=5% of the cathedral's invocations. Below 5% = deprecation candidate.
+
+
+## v0.37.x brainstorm cost-cathedral follow-ups (filed during T12)
+
+- [ ] **Explicit `--max-cost` flag on `gbrain extract`, `gbrain enrich`, `gbrain integrity auto`.** v0.37.x ships gateway-layer enforcement via `withBudgetTracker` — wrapping any of those commands at their entrypoint with `withBudgetTracker(tracker, fn)` immediately gives them the same cap semantics that brainstorm + doctor --remediate have. The CLI flag wiring (parse `--max-cost`, construct `BudgetTracker` with `maxCostUsd`, wrap the entrypoint) is the only missing piece. ~30 lines each plus smoke tests. Deferred per the plan's "NOT in scope" — gateway-layer composition was the structural goal; the per-command flag wiring is the next ergonomic win.
+
+- [ ] **`P5` config-schema `budgets:` block in `~/.gbrain/config.json`.** The lsd cost-explosion incident's P5 proposed declarative per-command budgets in config. v0.37.x ships the imperative `--max-cost N` surface, which covers the canonical case. Config-driven defaults (so users don't have to remember to pass `--max-cost` every time) are a v0.38+ ergonomic win. Shape:
+  ```yaml
+  budgets:
+    default:
+      max_cost_usd: 5.00
+      max_runtime_seconds: 300
+    brainstorm: { max_cost_usd: 2.00 }
+    lsd: { max_cost_usd: 5.00 }
+    dream: { max_cost_usd: 10.00 }
+  ```
+  Resolution: CLI flag > config block > built-in default.
+
+- [ ] **Multi-day brainstorm resume (>7d).** A5's 7-day mtime window covers >99% of crash-and-resume cases (an operator forgets for a week is rare). `--force-resume` is the escape hatch. The full multi-day story (longer retention, possibly a daily GC instead of cycle-purge-only, dashboard for in-flight runs) is a v0.38+ concern.
+
+- [ ] **Async-batched audit writes.** Sync `appendFileSync` is fine at typical volumes (~5ms × 100 crosses = ~500ms — not noticeable inside a $1 brainstorm run). Profiling trigger criterion: when 100+ crosses on a large brain shows audit-write time dominating wall-clock cost, switch to an async write queue. Fixing prematurely costs complexity for no measurable benefit.
+
+- [ ] **`BudgetLedger` unification with `BudgetTracker`.** `src/core/enrichment/budget.ts` defines a separate `BudgetLedger` primitive for per-day, per-scope/resolverId enrichment caps. Different shape from `BudgetTracker` (daily reset windows + multi-tier scope keys). Unification is possible but requires careful schema design to preserve enrichment's existing report semantics. Deferred because: (a) BudgetTracker covers the per-command case cleanly today, (b) the existing BudgetLedger isn't a customer-facing surface — it backs `gbrain enrich`'s internal accounting, (c) merging them would require a schema migration on the enrichment budget audit JSONL. Revisit when the enrichment surface gets its next major touch.
+
+- [ ] **judges.ts internal chunking → payload-fitter delegation.** v0.37.x ships `src/core/diarize/payload-fitter.ts` with the batch strategy ready to consume from `src/core/brainstorm/judges.ts`'s `runJudge` chunking path. Today judges.ts keeps its own copy of the chunking loop (~30 lines) — straightforward refactor: replace the inline split with `fit({strategy:'batch', items: ideas, maxTokensPerCall, estimateTokens})` and concatenate results. The cost-guardrails test suite already pins the public contract; the refactor is mechanical. Touch one function; trivial.
 
 ## v0.37 PGLite fresh-install fix wave — deferred follow-ups (v0.37.x+ / v0.38.x)
 

@@ -13,6 +13,7 @@ import type {
   TakesScorecard, TakesScorecardOpts, CalibrationBucket, CalibrationCurveOpts,
   FactRow, FactKind, FactVisibility, FactInsertStatus,
   NewFact, FactListOpts, FactsHealth,
+  SourceRow,
 } from './engine.ts';
 import { MAX_SEARCH_LIMIT, clampSearchLimit } from './engine.ts';
 import { runMigrations } from './migrate.ts';
@@ -324,7 +325,15 @@ export class PGLiteEngine implements BrainEngine {
         EXISTS (SELECT 1 FROM information_schema.columns
                 WHERE table_schema='public' AND table_name='sources' AND column_name='archive_expires_at') AS sources_archive_expires_at_exists,
         EXISTS (SELECT 1 FROM information_schema.columns
-                WHERE table_schema='public' AND table_name='pages' AND column_name='last_retrieved_at') AS pages_last_retrieved_at_exists
+                WHERE table_schema='public' AND table_name='pages' AND column_name='last_retrieved_at') AS pages_last_retrieved_at_exists,
+        EXISTS (SELECT 1 FROM information_schema.columns
+                WHERE table_schema='public' AND table_name='pages' AND column_name='ingested_via') AS pages_ingested_via_exists,
+        EXISTS (SELECT 1 FROM information_schema.columns
+                WHERE table_schema='public' AND table_name='pages' AND column_name='ingested_at') AS pages_ingested_at_exists,
+        EXISTS (SELECT 1 FROM information_schema.columns
+                WHERE table_schema='public' AND table_name='pages' AND column_name='source_uri') AS pages_source_uri_exists,
+        EXISTS (SELECT 1 FROM information_schema.columns
+                WHERE table_schema='public' AND table_name='pages' AND column_name='source_kind') AS pages_source_kind_exists
     `);
     const probe = rows[0] as {
       pages_exists: boolean;
@@ -356,6 +365,10 @@ export class PGLiteEngine implements BrainEngine {
       sources_archived_at_exists: boolean;
       sources_archive_expires_at_exists: boolean;
       pages_last_retrieved_at_exists: boolean;
+      pages_ingested_via_exists: boolean;
+      pages_ingested_at_exists: boolean;
+      pages_source_uri_exists: boolean;
+      pages_source_kind_exists: boolean;
     };
 
     const needsPagesBootstrap = probe.pages_exists && !probe.source_id_exists;
@@ -401,6 +414,14 @@ export class PGLiteEngine implements BrainEngine {
     // v0.37.0 (v79): pages_last_retrieved_at_idx in PGLITE_SCHEMA_SQL
     // references last_retrieved_at. Pre-v79 brains crash without the column.
     const needsPagesLastRetrievedAt = probe.pages_exists && !probe.pages_last_retrieved_at_exists;
+    // v0.38.0 (v80): provenance columns on pages. Not referenced by any
+    // SCHEMA_SQL index or FK today, but added defense-in-depth so future
+    // schema work that references them doesn't wedge pre-v80 brains.
+    const needsPagesProvenance = probe.pages_exists
+      && (!probe.pages_ingested_via_exists
+          || !probe.pages_ingested_at_exists
+          || !probe.pages_source_uri_exists
+          || !probe.pages_source_kind_exists);
 
     // Fresh installs (no tables yet) and modern brains both no-op.
     if (!needsPagesBootstrap && !needsLinksBootstrap && !needsChunksBootstrap
@@ -408,7 +429,8 @@ export class PGLiteEngine implements BrainEngine {
         && !needsMcpLogBootstrap && !needsSubagentProviderId
         && !needsPagesRecency && !needsIngestLogSourceId
         && !needsFilesBootstrap && !needsOauthClientsBootstrap
-        && !needsSourcesArchive && !needsPagesLastRetrievedAt) return;
+        && !needsSourcesArchive && !needsPagesLastRetrievedAt
+        && !needsPagesProvenance) return;
 
     console.log('  Pre-v0.21 brain detected, applying forward-reference bootstrap');
 
@@ -597,6 +619,20 @@ export class PGLiteEngine implements BrainEngine {
         ALTER TABLE pages ADD COLUMN IF NOT EXISTS last_retrieved_at TIMESTAMPTZ;
       `);
     }
+
+    if (needsPagesProvenance) {
+      // v81 (pages_provenance_columns): four nullable columns added by the
+      // v0.38 ingestion cathedral. No SCHEMA_SQL index or FK references
+      // them today, but bootstrap probes cover the column-only forward-
+      // reference class defense-in-depth so future schema work doesn't
+      // wedge pre-v81 brains.
+      await this.db.exec(`
+        ALTER TABLE pages ADD COLUMN IF NOT EXISTS ingested_via TEXT;
+        ALTER TABLE pages ADD COLUMN IF NOT EXISTS ingested_at TIMESTAMPTZ;
+        ALTER TABLE pages ADD COLUMN IF NOT EXISTS source_uri TEXT;
+        ALTER TABLE pages ADD COLUMN IF NOT EXISTS source_kind TEXT;
+      `);
+    }
   }
 
   async withReservedConnection<T>(fn: (conn: ReservedConnection) => Promise<T>): Promise<T> {
@@ -635,7 +671,8 @@ export class PGLiteEngine implements BrainEngine {
       where.push('deleted_at IS NULL');
     }
     const { rows } = await this.db.query(
-      `SELECT id, source_id, slug, type, title, compiled_truth, timeline, frontmatter, content_hash, created_at, updated_at, deleted_at
+      `SELECT id, source_id, slug, type, title, compiled_truth, timeline, frontmatter, content_hash, created_at, updated_at, deleted_at,
+              source_kind, source_uri, ingested_via, ingested_at
        FROM pages WHERE ${where.join(' AND ')} LIMIT 1`,
       params
     );
@@ -666,9 +703,17 @@ export class PGLiteEngine implements BrainEngine {
     // v0.32.7 CJK wave: chunker_version + source_path columns.
     const chunkerVersion = page.chunker_version ?? null;
     const sourcePath = page.source_path ?? null;
+    // v0.39.3.0 provenance write-through (WARN-8 + CV12). Mirrors postgres-engine.ts.
+    // Server stamps `ingested_at = now()` ONLY when any provenance field is being
+    // written this call. COALESCE-preserve UPDATE keeps the prior first-write
+    // timestamp intact so the audit trail survives routine edits.
+    const sourceKind = page.source_kind ?? null;
+    const sourceUri = page.source_uri ?? null;
+    const ingestedVia = page.ingested_via ?? null;
+    const ingestedAt = (sourceKind || sourceUri || ingestedVia) ? new Date().toISOString() : null;
     const { rows } = await this.db.query(
-      `INSERT INTO pages (source_id, slug, type, page_kind, title, compiled_truth, timeline, frontmatter, content_hash, updated_at, effective_date, effective_date_source, import_filename, chunker_version, source_path)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, now(), $10::timestamptz, $11, $12, COALESCE($13, 1), $14)
+      `INSERT INTO pages (source_id, slug, type, page_kind, title, compiled_truth, timeline, frontmatter, content_hash, updated_at, effective_date, effective_date_source, import_filename, chunker_version, source_path, source_kind, source_uri, ingested_via, ingested_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, now(), $10::timestamptz, $11, $12, COALESCE($13, 1), $14, $15, $16, $17, $18::timestamptz)
        ON CONFLICT (source_id, slug) DO UPDATE SET
          type = EXCLUDED.type,
          page_kind = EXCLUDED.page_kind,
@@ -682,9 +727,13 @@ export class PGLiteEngine implements BrainEngine {
          effective_date_source = COALESCE(EXCLUDED.effective_date_source, pages.effective_date_source),
          import_filename       = COALESCE(EXCLUDED.import_filename,       pages.import_filename),
          chunker_version       = COALESCE(EXCLUDED.chunker_version,       pages.chunker_version),
-         source_path           = COALESCE(EXCLUDED.source_path,           pages.source_path)
-       RETURNING id, source_id, slug, type, title, compiled_truth, timeline, frontmatter, content_hash, created_at, updated_at, effective_date, effective_date_source, import_filename`,
-      [sourceId, slug, page.type, pageKind, page.title, page.compiled_truth, page.timeline || '', JSON.stringify(frontmatter), hash, effectiveDate, effectiveDateSource, importFilename, chunkerVersion, sourcePath]
+         source_path           = COALESCE(EXCLUDED.source_path,           pages.source_path),
+         source_kind           = COALESCE(EXCLUDED.source_kind,           pages.source_kind),
+         source_uri            = COALESCE(EXCLUDED.source_uri,            pages.source_uri),
+         ingested_via          = COALESCE(EXCLUDED.ingested_via,          pages.ingested_via),
+         ingested_at           = COALESCE(EXCLUDED.ingested_at,           pages.ingested_at)
+       RETURNING id, source_id, slug, type, title, compiled_truth, timeline, frontmatter, content_hash, created_at, updated_at, effective_date, effective_date_source, import_filename, source_kind, source_uri, ingested_via, ingested_at`,
+      [sourceId, slug, page.type, pageKind, page.title, page.compiled_truth, page.timeline || '', JSON.stringify(frontmatter), hash, effectiveDate, effectiveDateSource, importFilename, chunkerVersion, sourcePath, sourceKind, sourceUri, ingestedVia, ingestedAt]
     );
     return rowToPage(rows[0] as Record<string, unknown>);
   }
@@ -895,6 +944,55 @@ export class PGLiteEngine implements BrainEngine {
        ORDER BY source_id, slug`
     );
     return (rows as { slug: string; source_id: string }[]).map(r => ({ slug: r.slug, source_id: r.source_id }));
+  }
+
+  async listAllSources(opts?: {
+    includeArchived?: boolean;
+    localPathOnly?: boolean;
+  }): Promise<SourceRow[]> {
+    // v0.38: parity with postgres-engine.listAllSources. Defaults match
+    // sources-ops.listSources (archived rows filtered out by default).
+    // localPathOnly skips pure-DB sources so autopilot fan-out doesn't
+    // dispatch jobs that would fall back to the global sync.repo_path.
+    const includeArchived = opts?.includeArchived === true;
+    const localPathOnly = opts?.localPathOnly === true;
+    const { rows } = await this.db.query<{
+      id: string;
+      name: string | null;
+      local_path: string | null;
+      last_sync_at: string | null;
+      config: unknown;
+    }>(
+      `SELECT id, name, local_path, last_sync_at, config
+         FROM sources
+        WHERE ($1::boolean OR archived IS NOT TRUE)
+          AND ($2::boolean OR local_path IS NOT NULL)
+        ORDER BY (id = 'default') DESC, id`,
+      [includeArchived, !localPathOnly],
+    );
+    return rows.map((r) => ({
+      id: r.id,
+      name: r.name,
+      local_path: r.local_path,
+      last_sync_at: r.last_sync_at ? new Date(r.last_sync_at) : null,
+      config: typeof r.config === 'string'
+        ? JSON.parse(r.config) as Record<string, unknown>
+        : ((r.config as Record<string, unknown> | null) ?? {}),
+    }));
+  }
+
+  async updateSourceConfig(sourceId: string, patch: Record<string, unknown>): Promise<boolean> {
+    // v0.38: parity with postgres-engine.updateSourceConfig. JSONB `||`
+    // concat operator (overrides same-key, no deep merge). PGLite passes
+    // `JSON.stringify(patch)` as the param; cast to jsonb on the SQL side.
+    const result = await this.db.query<{ id: string }>(
+      `UPDATE sources
+          SET config = COALESCE(config, '{}'::jsonb) || $1::jsonb
+        WHERE id = $2
+        RETURNING id`,
+      [JSON.stringify(patch), sourceId],
+    );
+    return result.rows.length > 0;
   }
 
   // v0.37.0 — domain-bank engine methods (D14 + D5 + D10).
@@ -2069,7 +2167,7 @@ export class PGLiteEngine implements BrainEngine {
     return (rows as Record<string, unknown>[]).map(r => ({
       slug: r.slug as string,
       title: r.title as string,
-      type: r.type as PageType,
+      type: r.type as string,
       depth: r.depth as number,
       links: (typeof r.links === 'string' ? JSON.parse(r.links) : r.links) as { to_slug: string; link_type: string }[],
     }));
