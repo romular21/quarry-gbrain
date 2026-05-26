@@ -201,6 +201,10 @@ CREATE INDEX IF NOT EXISTS idx_chunks_embedding_image
 -- v0.19.0: partial indexes for code chunk lookups.
 CREATE INDEX IF NOT EXISTS idx_chunks_symbol_name ON content_chunks(symbol_name) WHERE symbol_name IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_chunks_language ON content_chunks(language) WHERE language IS NOT NULL;
+-- v0.42.0.0 (codex finding #9): partial index for gbrain embed --stale
+-- and --priority recent. See src/schema.sql for full rationale.
+CREATE INDEX IF NOT EXISTS content_chunks_stale_idx
+  ON content_chunks(page_id, chunk_index) WHERE embedding IS NULL;
 
 -- ============================================================
 -- links: cross-references between pages
@@ -216,6 +220,10 @@ CREATE TABLE IF NOT EXISTS links (
   -- (gbrain extract links --by-mention). Filtered OUT of backlink-count
   -- for search ranking; only counts toward orphan-ratio + graph traversal.
   link_source    TEXT    CHECK (link_source IS NULL OR link_source IN ('markdown', 'frontmatter', 'manual', 'mentions')),
+  -- v0.42.0.0 (codex finding #12): nullable link_kind distinguishes
+  -- "plain body mention" from "verb-pattern-derived typed link" within
+  -- link_source='mentions'. See src/schema.sql for full rationale.
+  link_kind      TEXT    CHECK (link_kind IS NULL OR link_kind IN ('plain', 'typed_ner')),
   origin_page_id INTEGER REFERENCES pages(id) ON DELETE SET NULL,
   origin_field   TEXT,
   -- v0.18.0 Step 4: see src/schema.sql.
@@ -314,7 +322,9 @@ CREATE TABLE IF NOT EXISTS timeline_entries (
 CREATE INDEX IF NOT EXISTS idx_timeline_page ON timeline_entries(page_id);
 CREATE INDEX IF NOT EXISTS idx_timeline_date ON timeline_entries(date);
 -- Dedup constraint: same (page, date, summary) treated as same event
-CREATE UNIQUE INDEX IF NOT EXISTS idx_timeline_dedup ON timeline_entries(page_id, date, summary);
+-- v0.42.0.0 (codex finding #11): widened to include source so distinct
+-- meeting provenance survives. Legacy rows have source='' (schema default).
+CREATE UNIQUE INDEX IF NOT EXISTS idx_timeline_dedup ON timeline_entries(page_id, date, summary, source);
 
 -- ============================================================
 -- page_versions: snapshot history
@@ -875,6 +885,30 @@ CREATE TABLE IF NOT EXISTS op_checkpoints (
 );
 CREATE INDEX IF NOT EXISTS op_checkpoints_updated_at_idx
   ON op_checkpoints (updated_at);
+
+-- ============================================================
+-- migration_impact_log (v0.42.0.0 — gbrain onboard wave)
+-- ============================================================
+-- See src/schema.sql for full rationale.
+CREATE TABLE IF NOT EXISTS migration_impact_log (
+  id              BIGSERIAL PRIMARY KEY,
+  remediation_id  TEXT      NOT NULL,
+  metric_name     TEXT      NOT NULL,
+  metric_before   NUMERIC,
+  metric_after    NUMERIC,
+  job_id          BIGINT    REFERENCES minion_jobs(id) ON DELETE SET NULL,
+  source_id       TEXT,
+  brain_id        TEXT,
+  started_at      TIMESTAMPTZ,
+  idempotency_key TEXT,
+  applied_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  applied_by      TEXT,
+  details         JSONB     DEFAULT '{}'::jsonb
+);
+CREATE INDEX IF NOT EXISTS migration_impact_log_remediation_idx
+  ON migration_impact_log(remediation_id, applied_at DESC);
+CREATE INDEX IF NOT EXISTS migration_impact_log_attribution_idx
+  ON migration_impact_log(job_id, source_id) WHERE job_id IS NOT NULL;
 
 -- ============================================================
 -- Trigger-based search_vector (spans pages + timeline_entries)

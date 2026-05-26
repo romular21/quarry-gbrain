@@ -262,6 +262,13 @@ CREATE INDEX IF NOT EXISTS idx_chunks_embedding_image
 CREATE INDEX IF NOT EXISTS idx_chunks_search_vector ON content_chunks USING GIN(search_vector);
 CREATE INDEX IF NOT EXISTS idx_chunks_symbol_qualified
   ON content_chunks(symbol_name_qualified) WHERE symbol_name_qualified IS NOT NULL;
+-- v0.42.0.0 (codex finding #9): partial index for `gbrain embed --stale`
+-- + `--priority recent`. content_chunks has no updated_at column (chunks
+-- are re-INSERTed on page change, not UPDATEd), so the "recent-first"
+-- ORDER BY happens at the JOIN site: outer ORDER BY p.updated_at DESC
+-- uses idx_pages_updated_at_desc; inner partial uses this index.
+CREATE INDEX IF NOT EXISTS content_chunks_stale_idx
+  ON content_chunks(page_id, chunk_index) WHERE embedding IS NULL;
 
 -- v0.20.0 Cathedral II: chunk-grain FTS trigger.
 -- Weight 'A' on doc_comment + symbol_name_qualified; weight 'B' on chunk_text.
@@ -357,6 +364,12 @@ CREATE TABLE IF NOT EXISTS links (
   -- (gbrain extract links --by-mention). Filtered OUT of backlink-count
   -- for search ranking; only counts toward orphan-ratio + graph traversal.
   link_source    TEXT    CHECK (link_source IS NULL OR link_source IN ('markdown', 'frontmatter', 'manual', 'mentions')),
+  -- v0.42.0.0: nullable link_kind distinguishes "plain body mention" from
+  -- "verb-pattern-derived typed link" within link_source='mentions'.
+  -- Codex finding #12 design: keep link_source stable; add link_kind
+  -- so callers can distinguish without breaking existing mentions queries.
+  -- NULL = legacy / unknown / pre-v98 row (semantically 'plain').
+  link_kind      TEXT    CHECK (link_kind IS NULL OR link_kind IN ('plain', 'typed_ner')),
   origin_page_id INTEGER REFERENCES pages(id) ON DELETE SET NULL,
   origin_field   TEXT,
   -- v0.18.0 Step 4: 'qualified' when the link was written as
@@ -419,8 +432,10 @@ CREATE TABLE IF NOT EXISTS timeline_entries (
 
 CREATE INDEX IF NOT EXISTS idx_timeline_page ON timeline_entries(page_id);
 CREATE INDEX IF NOT EXISTS idx_timeline_date ON timeline_entries(date);
--- Dedup constraint: same (page, date, summary) treated as same event
-CREATE UNIQUE INDEX IF NOT EXISTS idx_timeline_dedup ON timeline_entries(page_id, date, summary);
+-- v0.42.0.0 (codex finding #11): widened from (page_id, date, summary) to
+-- include `source` so distinct meeting provenance survives. Legacy rows
+-- have source='' (schema default) so legacy dedup behavior is preserved.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_timeline_dedup ON timeline_entries(page_id, date, summary, source);
 
 -- ============================================================
 -- page_versions: snapshot history for compiled_truth
@@ -584,6 +599,39 @@ CREATE TABLE IF NOT EXISTS op_checkpoints (
 );
 CREATE INDEX IF NOT EXISTS op_checkpoints_updated_at_idx
   ON op_checkpoints (updated_at);
+
+-- ============================================================
+-- migration_impact_log: before/after metric stats per onboard remediation
+-- ============================================================
+-- v0.42.0.0 (gbrain onboard wave). Every completion captured by the
+-- onboard remediation pipeline records before/after metric stats so
+-- `gbrain onboard --history --json` can show "you reduced orphans 47%".
+-- delta computed at read time (NOT a stored GENERATED column —
+-- zero PGLite parity risk per eng-review D2).
+--
+-- Attribution columns (job_id, source_id, brain_id, started_at,
+-- idempotency_key) per codex finding #10 so concurrent onboard /
+-- autopilot / manual runs can't misattribute deltas to the wrong
+-- migration when overlapping runs change the same metric.
+CREATE TABLE IF NOT EXISTS migration_impact_log (
+  id              BIGSERIAL PRIMARY KEY,
+  remediation_id  TEXT      NOT NULL,
+  metric_name     TEXT      NOT NULL,
+  metric_before   NUMERIC,
+  metric_after    NUMERIC,
+  job_id          BIGINT    REFERENCES minion_jobs(id) ON DELETE SET NULL,
+  source_id       TEXT,
+  brain_id        TEXT,
+  started_at      TIMESTAMPTZ,
+  idempotency_key TEXT,
+  applied_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  applied_by      TEXT,
+  details         JSONB     DEFAULT '{}'::jsonb
+);
+CREATE INDEX IF NOT EXISTS migration_impact_log_remediation_idx
+  ON migration_impact_log(remediation_id, applied_at DESC);
+CREATE INDEX IF NOT EXISTS migration_impact_log_attribution_idx
+  ON migration_impact_log(job_id, source_id) WHERE job_id IS NOT NULL;
 
 -- ============================================================
 -- files: binary attachments stored in Supabase Storage
