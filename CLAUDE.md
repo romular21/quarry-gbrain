@@ -1946,6 +1946,27 @@ done
 
 If any SHA differs from what's in the workflow files, update the pin and version comment.
 
+## PR title format — version FIRST (IRON RULE)
+
+**Every PR title MUST start with the version, then the conventional-commit subject:**
+
+```
+vMAJOR.MINOR.PATCH.MICRO <type>(<scope>): <summary> (#issue or wave ref)
+```
+
+Example (correct): `v0.42.3.0 feat(search): autocut — score-discontinuity result-sizing (#1663 wave 1)`
+
+The version goes at the **BEGINNING**, never the end. This matches the repo's
+commit-subject convention (`git log` shows `v0.41.38.0 fix: ...`,
+`v0.42.1.0 feat: ...`) so the PR list, the merge commit, and the changelog all
+read version-first. A title with the version parenthesized at the end
+(`feat(search): autocut ... (v0.42.3.0)`) is WRONG — fix it with
+`gh pr edit <N> --title "vX.Y.Z.W <type>: <summary>"`.
+
+This applies to `gh pr create` and every `gh pr edit --title`. When `/ship`
+(or any flow) sets a PR title, the version is the first token. Same rule for the
+final commit subject that carries the version bump.
+
 ## PR descriptions cover the whole branch
 
 Pull request titles and bodies must describe **everything in the PR diff against the
