@@ -1155,6 +1155,12 @@ async function handleCliOnly(command: string, args: string[]) {
     try {
       await runDream(eng, args);
     } finally {
+      // #1471 invariant tripwire (the dream-cycle owner): `eng` created the
+      // module singleton (first module connector) and is disconnected LAST,
+      // here, after the whole cycle. The ownership fix relies on this owner's
+      // lifetime strictly dominating every borrower (lint/doctor probe engines
+      // created mid-cycle). Do NOT disconnect `eng` before runDream returns, or
+      // a borrower could outlive the owner and lose the shared singleton.
       if (eng) await eng.disconnect();
     }
     return;
@@ -1772,6 +1778,10 @@ async function handleCliOnly(command: string, args: string[]) {
       }
     }
   } finally {
+    // #1471: fall-through owner-disconnect for commands that don't create their
+    // own `eng` (dream/import/etc. disconnect their own owner + return early
+    // above). Same invariant — the owner is disconnected last, after the
+    // per-command work, so borrowers never outlive it.
     if (command !== 'serve') await engine.disconnect();
   }
 }

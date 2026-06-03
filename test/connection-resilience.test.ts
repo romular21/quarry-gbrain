@@ -130,25 +130,43 @@ describe('classifyWorkerExit', () => {
 // --- Mock-based tests for reconnect logic ---
 
 describe('PostgresEngine reconnect behavior', () => {
-  it('reconnect flag prevents concurrent reconnections', async () => {
-    // Simulate the _reconnecting guard
-    let reconnecting = false;
+  it('shared _reconnectPromise: concurrent callers run reconnect ONCE and AWAIT it (codex #5)', async () => {
+    // Models the v0.42.15.0 shared-promise reconnect (replacing the prior
+    // _reconnecting boolean that returned the 2nd caller immediately — its retry
+    // could then fire against a half-rebuilt pool). The fix: concurrent callers
+    // return the SAME in-flight promise, so they all await the single reconnect.
+    let reconnectPromise: Promise<void> | null = null;
     let reconnectCount = 0;
+    let completed = 0;
 
-    async function reconnect() {
-      if (reconnecting) return;
-      reconnecting = true;
-      try {
-        reconnectCount++;
-        await new Promise(r => setTimeout(r, 10));
-      } finally {
-        reconnecting = false;
-      }
+    function reconnect(): Promise<void> {
+      if (reconnectPromise) return reconnectPromise;
+      reconnectPromise = (async () => {
+        try {
+          reconnectCount++;
+          await new Promise(r => setTimeout(r, 10));
+        } finally {
+          reconnectPromise = null;
+        }
+      })();
+      return reconnectPromise;
     }
 
-    // Fire 3 concurrent reconnects — only 1 should run
-    await Promise.all([reconnect(), reconnect(), reconnect()]);
+    // Fire 3 concurrent reconnects — the work runs once...
+    await Promise.all([
+      reconnect().then(() => { completed++; }),
+      reconnect().then(() => { completed++; }),
+      reconnect().then(() => { completed++; }),
+    ]);
     expect(reconnectCount).toBe(1);
+    // ...AND all three callers actually awaited it (the old boolean gate left
+    // the 2nd/3rd resolving before the reconnect finished — this is the codex #5
+    // behavioral pin that the old shape failed).
+    expect(completed).toBe(3);
+
+    // A later call after the in-flight one settled starts a fresh reconnect.
+    await reconnect();
+    expect(reconnectCount).toBe(2);
   });
 
   it('executeRaw retry does not infinite-loop on persistent connection failure', async () => {

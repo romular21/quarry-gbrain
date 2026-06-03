@@ -138,7 +138,7 @@ export interface WithRetryOpts {
    *
    * Engine-level callers (PostgresEngine.batchRetry) inject
    * `() => this.reconnect()` which already handles both module and
-   * instance pools, race-safe via `_reconnecting` guard.
+   * instance pools, race-safe via a shared in-flight `_reconnectPromise`.
    */
   reconnect?: () => Promise<void>;
 }
