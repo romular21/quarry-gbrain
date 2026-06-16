@@ -2222,13 +2222,26 @@ const get_skill: Operation = {
     name: {
       type: 'string',
       required: true,
-      description: 'Skill name exactly as returned by list_skills.',
+      description: 'Skill name exactly as returned by list_skills (or the brain-pack skill slug when source_id is set).',
+    },
+    source_id: {
+      type: 'string',
+      description:
+        'Optional: fetch a brain-resident pack skill from this source instead of the host catalog. ' +
+        'Disambiguates a slug that exists on more than one source (see list_brain_skillpack).',
     },
   },
   handler: async (ctx, p) => {
     const sc = await import('./skill-catalog.ts');
     const publish = await sc.readMcpPublishSkills(ctx);
     sc.assertPublishEnabled(ctx, publish);
+    // Brain-resident path: when source_id is supplied, fetch the per-source pack
+    // skill (confined to that source's pack root) rather than the host catalog.
+    if (typeof p.source_id === 'string' && p.source_id.length > 0) {
+      const brl = await import('./skillpack/brain-resident-locate.ts');
+      const slug = typeof p.name === 'string' ? p.name : '';
+      return brl.getResidentSkillDetail(ctx, p.source_id, slug);
+    }
     const override = await sc.readMcpSkillsDir(ctx);
     const { dir } = sc.resolveSkillsDir(ctx, override);
     const name = typeof p.name === 'string' ? p.name : '';
@@ -2236,6 +2249,76 @@ const get_skill: Operation = {
   },
   scope: 'read',
   cliHints: { name: 'skill', positional: ['name'] },
+};
+
+const list_brain_skillpack: Operation = {
+  name: 'list_brain_skillpack',
+  description:
+    'List brain-resident skillpacks this brain ships (per-source). Returns each pack\'s skills, ' +
+    'one-line descriptions, the schema pack it targets + whether that matches this brain, and a ' +
+    'git scaffold spec. Read-only; gated by mcp.publish_skills. After orienting, call this and ' +
+    'ask the user whether to install any pack the brain offers (gbrain skillpack scaffold <spec>).',
+  params: {},
+  handler: async (ctx) => {
+    const sc = await import('./skill-catalog.ts');
+    const publish = await sc.readMcpPublishSkills(ctx);
+    sc.assertPublishEnabled(ctx, publish);
+    const brl = await import('./skillpack/brain-resident-locate.ts');
+    return brl.loadResidentPacksForServer(ctx);
+  },
+  scope: 'read',
+  cliHints: { name: 'brain-skillpack', positional: [] },
+};
+
+const advisor: Operation = {
+  name: 'advisor',
+  description:
+    'Ranked, read-only "what to do next" for this brain: version drift, pending migrations, ' +
+    'schema-pack issues, stalled jobs, usage-shape gaps, and setup smells. Each finding has a ' +
+    'severity, why-it-matters, and the exact fix command. Never mutates. Tell the user; ask ' +
+    'before running any fix. Gated by mcp.publish_advisor (separate from mcp.publish_skills ' +
+    'because diagnostics are not prose skills).',
+  params: {},
+  handler: async (ctx) => {
+    // Publish gate: a remote caller needs mcp.publish_advisor=true. Local
+    // (ctx.remote === false) callers bypass — the trust boundary is the OS.
+    if (ctx.remote !== false) {
+      let enabled = false;
+      try {
+        const dbVal = await ctx.engine.getConfig('mcp.publish_advisor');
+        enabled = dbVal != null ? dbVal === 'true' : ctx.config?.mcp?.publish_advisor === true;
+      } catch {
+        enabled = ctx.config?.mcp?.publish_advisor === true;
+      }
+      if (!enabled) {
+        throw new OperationError(
+          'permission_denied',
+          'The advisor is not published over MCP by the brain owner.',
+          'The owner can enable it with `gbrain config set mcp.publish_advisor true`.',
+        );
+      }
+    }
+    const { runAdvisor } = await import('./advisor/run.ts');
+    const { VERSION } = await import('../version.ts');
+    // Over MCP there is no agent workspace on the server side: remote=true makes
+    // runAdvisor drop workspace-dependent collectors (A1). The op never writes
+    // history or nag state — it is strictly read-only.
+    const report = await runAdvisor({
+      engine: ctx.engine,
+      config: ctx.config,
+      version: VERSION,
+      workspace: null,
+      skillsDir: null,
+      now: new Date(),
+      remote: ctx.remote !== false,
+    });
+    return report;
+  },
+  scope: 'read',
+  // NOT localOnly — exposed over MCP (E1) behind mcp.publish_advisor.
+  // No cliHints: the CLI surface is the richer `gbrain advisor` command
+  // (commands/advisor.ts) which adds --json exit codes + --apply.
+  cliHints: { name: 'advisor', hidden: true },
 };
 
 /**
@@ -4826,7 +4909,7 @@ export const operations: Operation[] = [
   // v0.31.1 (Issue #734): thin-client banner identity packet (read-scope, banner-only)
   get_brain_identity,
   // PR1: skill catalog over MCP — discover + fetch host-repo skills (read-scope)
-  list_skills, get_skill,
+  list_skills, get_skill, list_brain_skillpack, advisor,
   // v0.41.19.0: thin-client `gbrain status` payload (admin-scope, sync + cycle only)
   get_status_snapshot,
   // Sync
