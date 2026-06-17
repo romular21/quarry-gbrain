@@ -23,6 +23,56 @@ and the scope record at `~/.gstack/projects/garrytan-gbrain/ceo-plans/2026-06-12
   `src/core/verbs/entity-card.ts` open-threads assembly + a new schema table
   (additive — the card field already exists, so this is a quality upgrade, not
   a contract change).
+## Pace Mode follow-ups (filed v0.42.49.0)
+
+Deferred from the paced-backfill wave (CEO + eng review CLEARED). Core shipped:
+`db-pacer` + `pace-mode` wired into embed (CLI + shared core + `embed-backfill`
+job) and sync. See CLAUDE.md "Pace Mode".
+
+- [ ] **P2 — `doctor` pacing check (E2).** Detect a txn-mode pooler (port 6543)
+  running unpaced bulk and recommend `--pace`; optionally correlate recent
+  `minion_jobs` deaths with backfill windows. Where: `src/commands/doctor.ts`.
+- [ ] **P2 — `--pace=auto` autotuned thresholds (E3).** Derive `paceAtMs`/cap from
+  observed baseline latency (rolling median) instead of fixed bundle values,
+  mirroring `gbrain search tune`. Needs a baseline window + cold-start default +
+  config persistence — not a small add. Where: `src/core/pace-mode.ts` +
+  `src/core/db-pacer.ts`.
+- [ ] **P3 — First-class pacing in more minion job handlers (E5).** `embed-backfill`
+  is paced; extend to `extract`/`embed-catch-up`/contextual-reindex handlers with
+  supervisor-detection downgrade. Today these inherit config/env pacing only when
+  they call `runEmbedCore`.
+- [ ] **P1-companion — Supervisor concurrency 3→2 + job-kind slot fairness (E7).**
+  The daemon-side root cause the external wrapper's probe was blind to:
+  `embed-backfill`/`autopilot-cycle` jobs can occupy all supervisor slots
+  (`:215` below). Pacing makes backfills safe; this fixes the residual death rate.
+  Where: `src/core/minions/supervisor.ts` + queue slot accounting.
+- [ ] **P3 — `gbrain sync --pace` CLI flag.** Sync reads env/config pacing today;
+  add a per-run `--pace[=mode]` flag for symmetry with `embed`. Where:
+  `src/commands/sync.ts` arg parsing.
+- [ ] **P3 — Real-PG e2e for pacing.** Gated on `DATABASE_URL`: paced
+  `embed --stale --pace --progress-json` caps concurrency + emits telemetry;
+  single-flight rejects a 2nd concurrent run; lock heartbeat advances during a
+  paced sleep (short-TTL). Unit coverage (`db-pacer`/`pace-mode`) already ships.
+## brain-repo durability follow-ups (filed v0.42.48.0)
+
+- [ ] **P3 — gbrain write-path calls commit-push synchronously when durability is on.**
+  v0.42.48.0 ships the synchronous `brain-commit-push.sh` as the guarantee and a local
+  post-commit hook as a best-effort fallback. The strongest durability (codex outside-voice
+  D13-C) is to have gbrain's own write-through path call the commit-push helper synchronously
+  when a source is hardened — that also covers writes that never get committed by an agent.
+  Deferred because it touches the write path; the hook + mandated helper cover the
+  agent-driven case today.
+  - **Where to start:** `src/core/write-through.ts:writePageThrough` + a per-source "hardened"
+    flag to gate the synchronous push.
+
+- [ ] **P3 — Unify the durability pull cron with autopilot's OS-scheduler.**
+  v0.42.48.0 ships a minimal launchd/crontab installer inside `brain-repo-durability.ts`
+  (D12: minimal-now to keep the diff off the load-bearing autopilot feature). Extract a shared
+  `os-scheduler.ts` (`installPeriodic`/`removePeriodic`) and have both autopilot and brain-pull
+  call it, so there's one OS-cron path.
+  - **Where to start:** `src/commands/autopilot.ts` (`installLaunchd`/`installSystemd`/
+    `installCrontab`/`writeWrapperScript`) + `brain-repo-durability.ts:installDurabilityCron`.
+
 ## gbrain#2200 federated-read follow-ups (filed v0.42.46.0)
 
 - [ ] **P1 — Close the federated-read scope on the remaining same-class by-slug read ops.**
