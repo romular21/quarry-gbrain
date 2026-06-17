@@ -293,7 +293,11 @@ export const ExitCodes = {
  * pidfile path. TTL > refresh-interval × max-failures so we always exit
  * before our lock could lapse and let a second supervisor take over.
  */
-const SUPERVISOR_LOCK_TTL_MIN = 5;
+// Exported (issue #2227) so observability surfaces (`gbrain jobs supervisor
+// status`, `gbrain doctor`) compute the lock-freshness steal grace with the
+// SAME TTL the supervisor refreshes against, when detecting a live supervisor
+// via the DB lock instead of the (possibly split-$HOME) pidfile.
+export const SUPERVISOR_LOCK_TTL_MIN = 5;
 const SUPERVISOR_LOCK_REFRESH_MS = 60_000;
 const SUPERVISOR_LOCK_REFRESH_MAX_FAILURES = 3; // 3 × 60s = 180s < 5min TTL
 
