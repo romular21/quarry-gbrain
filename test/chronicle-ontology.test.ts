@@ -82,6 +82,15 @@ describe('findOntologyConflicts + discoverOntologyDimensions', () => {
     expect(bobRole!.values.map((v) => v.value).sort()).toEqual(['advisor', 'founder']);
   });
 
+  test('forward supersession is NOT reported as a conflict (only live disagreement is)', async () => {
+    // founder (2024) → advisor (2026): the founder row is closed via valid_until,
+    // so it must NOT count as a current conflict (codex pre-landing fix #1).
+    await engine.mergeOntologyFact({ entitySlug: SARAH, dimension: 'role', value: 'founder', source: 'm/a', validFrom: '2024-01-01' });
+    await engine.mergeOntologyFact({ entitySlug: SARAH, dimension: 'role', value: 'advisor', source: 'm/b', validFrom: '2026-05-01' });
+    const conflicts = await engine.findOntologyConflicts();
+    expect(conflicts.some((c) => c.entity_slug === SARAH && c.dimension === 'role')).toBe(false);
+  });
+
   test('discoverOntologyDimensions rolls up by dimension', async () => {
     await engine.mergeOntologyFact({ entitySlug: SARAH, dimension: 'role', value: 'founder', source: 'meetings/a' });
     await engine.mergeOntologyFact({ entitySlug: 'people/bob', dimension: 'role', value: 'advisor', source: 'meetings/b' });

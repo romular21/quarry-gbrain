@@ -3681,7 +3681,7 @@ export class PostgresEngine implements BrainEngine {
       WITH cur AS (
         SELECT entity_slug, dimension, value, source_markdown_slug AS source, confidence, id AS fact_id
         FROM facts
-        WHERE dimension IS NOT NULL AND expired_at IS NULL
+        WHERE dimension IS NOT NULL AND expired_at IS NULL AND valid_until IS NULL
           AND (dim_status IS NULL OR dim_status = 'active')
           AND confidence >= ${minConf} ${scope}
       )

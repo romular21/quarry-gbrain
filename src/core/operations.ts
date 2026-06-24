@@ -5217,10 +5217,18 @@ const ontology_conflicts: Operation = {
   params: {
     min_confidence: { type: 'number', description: 'Only consider observations at/above this confidence (0..1).' },
   },
-  handler: async (ctx, p) => ctx.engine.findOntologyConflicts({
-    minConfidence: typeof p.min_confidence === 'number' ? p.min_confidence : undefined,
-    ...sourceScopeOpts(ctx),
-  }),
+  handler: async (ctx, p) => {
+    const conflicts = await ctx.engine.findOntologyConflicts({
+      minConfidence: typeof p.min_confidence === 'number' ? p.min_confidence : undefined,
+      ...sourceScopeOpts(ctx),
+    });
+    if (ctx.remote === false) return conflicts;
+    // Remote: redact diary-sourced values; drop conflicts that no longer have
+    // ≥2 distinct values once diary provenance is removed (no leak via conflicts).
+    return conflicts
+      .map((c) => ({ ...c, values: c.values.filter((v) => !(v.source ?? '').startsWith('life/diary/')) }))
+      .filter((c) => new Set(c.values.map((v) => v.value)).size >= 2);
+  },
   cliHints: { name: 'ontology-contradictions' },
 };
 

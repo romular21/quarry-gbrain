@@ -73,6 +73,9 @@ export function isValidProposal(e: unknown): e is ChronicleEventProposal {
   const o = e as Record<string, unknown>;
   return (
     typeof o.when === 'string' && o.when.length >= 4 &&
+    // Must be a REAL parseable date — otherwise isoDay()/::date would write a
+    // garbage event page and then throw on the projection cast (partial write).
+    !Number.isNaN(new Date(o.when).getTime()) &&
     typeof o.what === 'string' && o.what.trim().length > 0 &&
     Array.isArray(o.who) && o.who.every((w) => typeof w === 'string') &&
     typeof o.kind === 'string'

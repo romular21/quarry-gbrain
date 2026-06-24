@@ -40,6 +40,16 @@ describe('ontology ops', () => {
     expect(remote.some((r) => (r.source ?? '').startsWith('life/diary/'))).toBe(false);
   });
 
+  test('remote ontology_conflicts redacts diary-sourced disagreement (codex fix #3)', async () => {
+    // A conflict where one side is diary-sourced: advisor (meeting) vs founder (diary).
+    await engine.mergeOntologyFact({ entitySlug: 'people/y', dimension: 'role', value: 'advisor', source: 'meetings/a', validFrom: '2026-05-01' });
+    await engine.mergeOntologyFact({ entitySlug: 'people/y', dimension: 'role', value: 'founder', source: 'life/diary/2026-06-18', validFrom: '2026-01-01' });
+    const local = await operationsByName.ontology_conflicts.handler(ctx(false), {}) as { entity_slug: string }[];
+    expect(local.some((c) => c.entity_slug === 'people/y')).toBe(true);
+    const remote = await operationsByName.ontology_conflicts.handler(ctx(true), {}) as { entity_slug: string }[];
+    expect(remote.some((c) => c.entity_slug === 'people/y')).toBe(false); // diary side redacted → no longer a disagreement
+  });
+
   test('ontology_dimensions + ontology_conflicts surface via ops', async () => {
     await engine.mergeOntologyFact({ entitySlug: SARAH, dimension: 'role', value: 'advisor', source: 'meetings/a', validFrom: '2026-05-01' });
     await engine.mergeOntologyFact({ entitySlug: SARAH, dimension: 'role', value: 'founder', source: 'meetings/b', validFrom: '2026-01-01' });

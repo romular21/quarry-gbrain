@@ -97,6 +97,15 @@ describe('runChronicleExtract', () => {
     expect(await countEvents()).toBe(before); // no partial write
   });
 
+  test('parse barrier: a non-date `when` writes NOTHING (codex fix #2)', async () => {
+    const before = await countEvents();
+    const badDate: ChronicleJudge = async () => ({ events: [{ when: 'not-a-date', who: [], what: 'x', kind: 'meeting' }] });
+    const r = await runChronicleExtract(engine, { slug: 'meetings/2026-06-18-sync', judge: badDate });
+    expect(r.status).toBe('skipped');
+    expect(r.reason).toBe('malformed_proposal');
+    expect(await countEvents()).toBe(before);
+  });
+
   test('no events → no_events status', async () => {
     const none: ChronicleJudge = async () => ({ events: [] });
     const r = await runChronicleExtract(engine, { slug: 'meetings/2026-06-18-sync', judge: none });
