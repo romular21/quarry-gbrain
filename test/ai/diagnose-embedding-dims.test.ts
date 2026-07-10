@@ -14,7 +14,7 @@
  * runs its real config-only logic rather than the test fast-path.
  */
 
-import { afterEach, describe, expect, test } from 'bun:test';
+import { afterAll, afterEach, describe, expect, test } from 'bun:test';
 import {
   configureGateway,
   diagnoseEmbedding,
@@ -24,6 +24,19 @@ import {
 import { DEFAULT_EMBEDDING_DIMENSIONS } from '../../src/core/ai/defaults.ts';
 
 afterEach(() => resetGateway());
+
+// Shard hygiene: a file must not END with a reset/non-legacy gateway. The
+// legacy-embedding-preload restores 1536 per-TEST, but the NEXT file's
+// beforeAll (often engine.initSchema, which sizes vector columns from the
+// ambient gateway) runs before any beforeEach — so leaving the gateway null
+// here would seed 1280-d schemas under that file's 1536-d fixtures.
+afterAll(() => {
+  configureGateway({
+    embedding_model: 'openai:text-embedding-3-large',
+    embedding_dimensions: 1536,
+    env: { ...process.env },
+  });
+});
 
 describe('diagnoseEmbedding dims-presence guard (#1292/D6)', () => {
   test('litellm:<model> WITH embedding_dimensions → available (the #1292 false-positive is gone)', () => {

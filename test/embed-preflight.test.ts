@@ -20,9 +20,21 @@ import type { AIGatewayConfig } from '../src/core/ai/types.ts';
 // behind — and bun runs every file in a shard inside ONE process, so that
 // residue (e.g. OPENAI_API_KEY: 'sk-test') bleeds into the next file's
 // isAvailable('embedding') check. That's what made facts-backstop-gating
-// fail intermittently (bin-pack-dependent) on CI shard 10. Clean up after
-// the whole file so the gateway is pristine for whatever runs next.
-afterAll(() => { resetGateway(); });
+// fail intermittently (bin-pack-dependent) on CI shard 10.
+//
+// Don't end on a bare resetGateway() either: the NEXT file's beforeAll
+// (often engine.initSchema, which sizes vector columns from ambient gateway
+// state) runs before the legacy-embedding-preload's per-test restore, so a
+// null gateway here would seed 1280-d schemas under 1536-d fixtures.
+// Restore the preload's legacy pin instead.
+afterAll(() => {
+  resetGateway();
+  configureGateway({
+    embedding_model: 'openai:text-embedding-3-large',
+    embedding_dimensions: 1536,
+    env: { ...process.env },
+  });
+});
 
 function baseConfig(overrides: Partial<AIGatewayConfig> = {}): AIGatewayConfig {
   return {
