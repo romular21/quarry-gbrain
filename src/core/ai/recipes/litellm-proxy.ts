@@ -20,6 +20,15 @@ export const litellmProxy: Recipe = {
     setup_url: 'https://docs.litellm.ai/docs/proxy/quick_start',
   },
   touchpoints: {
+    chat: {
+      // Models depend on the proxy's config; the openai-compat tier accepts
+      // user-provided IDs and lets the proxied backend validate them.
+      models: [],
+      supports_tools: true,
+      supports_subagent_loop: false,
+      supports_prompt_cache: false,
+      price_last_verified: '2026-04-20',
+    },
     embedding: {
       // Models depend on the proxy's config; declare empties so wizard prompts user.
       models: [],
@@ -42,5 +51,5 @@ export const litellmProxy: Recipe = {
       supports_multimodal: true,
     },
   },
-  setup_hint: 'Run LiteLLM (https://docs.litellm.ai) in front of any provider; set LITELLM_BASE_URL (include the /v1 suffix if your proxy serves the OpenAI route there, e.g. http://localhost:4000/v1) + pass --embedding-model litellm:<model> and --embedding-dimensions <N>.',
+  setup_hint: 'Run LiteLLM (https://docs.litellm.ai) in front of any provider; set LITELLM_BASE_URL (include the /v1 suffix if your proxy serves the OpenAI route there, e.g. http://localhost:4000/v1), optionally set LITELLM_API_KEY, and use litellm:<model> for chat. For embeddings, also pass --embedding-model litellm:<model> and --embedding-dimensions <N>.',
 };
