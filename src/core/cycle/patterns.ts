@@ -83,7 +83,7 @@ export async function runPhasePatterns(
     };
     const submitOpts: Partial<MinionJobInput> = {
       max_stalled: 3,
-      timeout_ms: 30 * 60 * 1000,
+      timeout_ms: config.subagentTimeoutMs,
     };
     const job = await queue.add('subagent', data as unknown as Record<string, unknown>, submitOpts, {
       allowProtectedSubmit: true,
@@ -92,7 +92,7 @@ export async function runPhasePatterns(
     let outcome: string;
     try {
       const final = await waitForCompletion(queue, job.id, {
-        timeoutMs: 35 * 60 * 1000,
+        timeoutMs: config.subagentWaitTimeoutMs,
         pollMs: 5 * 1000,
       });
       outcome = final.status;
@@ -113,13 +113,47 @@ export async function runPhasePatterns(
     // Reverse-write to fs.
     const reverseWriteCount = await reverseWriteRefs(engine, opts.brainDir, writtenRefs);
 
-    return ok(`${writtenRefs.length} pattern page(s) written/updated (${outcome})`, {
+    const details = {
       reflections_considered: reflections.length,
       patterns_written: writtenRefs.length,
       reverse_write_count: reverseWriteCount,
       child_outcome: outcome,
       job_id: job.id,
-    });
+    };
+
+    // #2782: the phase status must reflect the child outcome. Pre-fix this
+    // returned status:ok even when the subagent timed out (e.g. no
+    // subagent-capable worker slot free for the whole wait window) and zero
+    // pattern pages were written — a silent no-op for days.
+    if (outcome !== 'complete') {
+      if (writtenRefs.length === 0) {
+        return {
+          phase: 'patterns',
+          status: 'fail',
+          duration_ms: 0,
+          summary: `pattern-detection subagent job ${job.id} ended '${outcome}'; nothing was written`,
+          details,
+          error: makeError(
+            outcome === 'timeout' ? 'Timeout' : 'InternalError',
+            `PATTERNS_CHILD_${outcome.toUpperCase()}`,
+            `subagent job ${job.id} outcome '${outcome}' with zero pattern pages written`,
+            outcome === 'timeout'
+              ? 'A timeout with zero writes usually means no subagent-capable worker claimed the job. Check `gbrain jobs list` and worker capacity.'
+              : undefined,
+          ),
+        };
+      }
+      // Partial: the child died/timed out but some pages landed first.
+      return {
+        phase: 'patterns',
+        status: 'warn',
+        duration_ms: 0,
+        summary: `${writtenRefs.length} pattern page(s) written but subagent job ${job.id} ended '${outcome}'`,
+        details,
+      };
+    }
+
+    return ok(`${writtenRefs.length} pattern page(s) written/updated (${outcome})`, details);
   } catch (e) {
     return failed(makeError('InternalError', 'PATTERNS_PHASE_FAIL',
       e instanceof Error ? (e.message || 'patterns phase threw') : String(e)));
@@ -135,6 +169,20 @@ interface PatternsConfig {
   lookbackDays: number;
   minEvidence: number;
   model: string;
+  /** #1594-family: subagent job timeout, config `dream.patterns.subagent_timeout_ms`. */
+  subagentTimeoutMs: number;
+  /** #1594-family: waitForCompletion timeout, config `dream.patterns.subagent_wait_timeout_ms`. */
+  subagentWaitTimeoutMs: number;
+}
+
+const DEFAULT_PATTERNS_SUBAGENT_TIMEOUT_MS = 30 * 60 * 1000;
+const DEFAULT_PATTERNS_SUBAGENT_WAIT_TIMEOUT_MS = 35 * 60 * 1000;
+
+async function getNumberConfig(engine: BrainEngine, key: string, fallback: number): Promise<number> {
+  const raw = await engine.getConfig(key);
+  if (raw === undefined || raw === null) return fallback;
+  const value = Number(raw);
+  return Number.isNaN(value) ? fallback : value;
 }
 
 async function loadPatternsConfig(engine: BrainEngine): Promise<PatternsConfig> {
@@ -155,6 +203,12 @@ async function loadPatternsConfig(engine: BrainEngine): Promise<PatternsConfig> 
     lookbackDays: lookbackStr ? Math.max(1, parseInt(lookbackStr, 10) || 30) : 30,
     minEvidence: minEvidenceStr ? Math.max(1, parseInt(minEvidenceStr, 10) || 3) : 3,
     model,
+    subagentTimeoutMs: await getNumberConfig(
+      engine, 'dream.patterns.subagent_timeout_ms', DEFAULT_PATTERNS_SUBAGENT_TIMEOUT_MS,
+    ),
+    subagentWaitTimeoutMs: await getNumberConfig(
+      engine, 'dream.patterns.subagent_wait_timeout_ms', DEFAULT_PATTERNS_SUBAGENT_WAIT_TIMEOUT_MS,
+    ),
   };
 }
 
