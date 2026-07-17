@@ -412,6 +412,12 @@ export interface SubagentHandlerData {
   /** Max assistant turns before the loop fails with stop_reason='max_turns'. */
   max_turns?: number;
   /**
+   * Per-turn max output tokens (#2778). Resolution: this field →
+   * `agent.max_output_tokens` config → 8192 default. The pre-#2778
+   * hardcoded 4096 made pages >~12KB unwritable via put_page.
+   */
+  max_tokens?: number;
+  /**
    * Whitelist of tool names the agent may call. MUST be a subset of the
    * derived registry names — invalid entries are rejected at tool-dispatch
    * time, not silently ignored. Empty array = no tools.
@@ -573,6 +579,7 @@ export type ContentBlock =
 export type SubagentStopReason =
   | 'end_turn'    // Anthropic says end_turn and last message has no tool_use
   | 'max_turns'   // hit max_turns budget before end_turn
+  | 'max_tokens'  // final turn hit the output-token cap — result text is TRUNCATED (#2778)
   | 'refusal'     // detected via stop_reason + content shape
   | 'error';      // unrecoverable (empty response retry exhausted, etc.)
 

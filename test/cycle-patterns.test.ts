@@ -39,9 +39,14 @@ describe('patterns phase wiring', () => {
     expect(patternsSrc).toContain("tool_name = 'brain_put_page'");
   });
 
-  test('skips when ANTHROPIC_API_KEY missing', () => {
-    expect(patternsSrc).toContain('ANTHROPIC_API_KEY');
-    expect(patternsSrc).toContain('no_api_key');
+  test('gates on gateway provider reachability, not ANTHROPIC_API_KEY (PR #2279)', () => {
+    // The gate must probe the RESOLVED patterns model through the gateway
+    // (any configured provider can run patterns), not hardcode the Anthropic
+    // env var — that misclassified non-Anthropic stacks as "no upstream".
+    expect(patternsSrc).toContain('probeChatModel');
+    expect(patternsSrc).toContain('normalizeModelId');
+    expect(patternsSrc).toContain('no_provider');
+    expect(patternsSrc).not.toContain('process.env.ANTHROPIC_API_KEY');
   });
 
   test('skips when reflections below min_evidence', () => {

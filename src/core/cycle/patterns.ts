@@ -30,6 +30,8 @@ import type { Page, PageType } from '../types.ts';
 // #2415: allow-list + output-root resolution shared with the synthesize
 // phase — both phases must agree on the configured namespace.
 import { loadAllowedSlugPrefixes, loadOutputRoot } from './synthesize.ts';
+import { probeChatModel } from '../ai/gateway.ts';
+import { normalizeModelId } from '../model-id.ts';
 
 export interface PatternsPhaseOpts {
   brainDir: string;
@@ -66,9 +68,20 @@ export async function runPhasePatterns(
       });
     }
 
-    // Submit one subagent for pattern detection.
-    if (!process.env.ANTHROPIC_API_KEY) {
-      return skipped('no_api_key', 'ANTHROPIC_API_KEY unset; pattern detection skipped');
+    // Submit one subagent for pattern detection. The subagent dispatches via
+    // the gateway model-tier resolver, so gate on "is the resolved model's
+    // provider reachable" rather than ANTHROPIC_API_KEY specifically — a
+    // hardcoded env gate misclassified non-Anthropic stacks (litellm,
+    // deepseek, openrouter, ...) as "no upstream" even though the subagent
+    // routes them through the gateway (agent.use_gateway_loop), and it missed
+    // Anthropic keys set via `gbrain config set anthropic_api_key`. Same
+    // probe semantics as think/index.ts + synthesize's makeJudgeClient:
+    // unknown provider/model or Anthropic-without-key skips cheaply; other
+    // providers' auth is checked lazily at dispatch and surfaces in the job
+    // outcome. (Takeover of PR #2279's intent by @brettdavies.)
+    const probe = probeChatModel(normalizeModelId(config.model));
+    if (!probe.ok) {
+      return skipped('no_provider', `pattern detection skipped: ${probe.detail}`);
     }
 
     const allowedSlugPrefixes = await loadAllowedSlugPrefixes(config.outputRoot);
@@ -86,7 +99,7 @@ export async function runPhasePatterns(
     };
     const submitOpts: Partial<MinionJobInput> = {
       max_stalled: 3,
-      timeout_ms: 30 * 60 * 1000,
+      timeout_ms: config.subagentTimeoutMs,
     };
     const job = await queue.add('subagent', data as unknown as Record<string, unknown>, submitOpts, {
       allowProtectedSubmit: true,
@@ -95,7 +108,7 @@ export async function runPhasePatterns(
     let outcome: string;
     try {
       const final = await waitForCompletion(queue, job.id, {
-        timeoutMs: 35 * 60 * 1000,
+        timeoutMs: config.subagentWaitTimeoutMs,
         pollMs: 5 * 1000,
       });
       outcome = final.status;
@@ -116,13 +129,47 @@ export async function runPhasePatterns(
     // Reverse-write to fs.
     const reverseWriteCount = await reverseWriteRefs(engine, opts.brainDir, writtenRefs);
 
-    return ok(`${writtenRefs.length} pattern page(s) written/updated (${outcome})`, {
+    const details = {
       reflections_considered: reflections.length,
       patterns_written: writtenRefs.length,
       reverse_write_count: reverseWriteCount,
       child_outcome: outcome,
       job_id: job.id,
-    });
+    };
+
+    // #2782: the phase status must reflect the child outcome. Pre-fix this
+    // returned status:ok even when the subagent timed out (e.g. no
+    // subagent-capable worker slot free for the whole wait window) and zero
+    // pattern pages were written — a silent no-op for days.
+    if (outcome !== 'complete') {
+      if (writtenRefs.length === 0) {
+        return {
+          phase: 'patterns',
+          status: 'fail',
+          duration_ms: 0,
+          summary: `pattern-detection subagent job ${job.id} ended '${outcome}'; nothing was written`,
+          details,
+          error: makeError(
+            outcome === 'timeout' ? 'Timeout' : 'InternalError',
+            `PATTERNS_CHILD_${outcome.toUpperCase()}`,
+            `subagent job ${job.id} outcome '${outcome}' with zero pattern pages written`,
+            outcome === 'timeout'
+              ? 'A timeout with zero writes usually means no subagent-capable worker claimed the job. Check `gbrain jobs list` and worker capacity.'
+              : undefined,
+          ),
+        };
+      }
+      // Partial: the child died/timed out but some pages landed first.
+      return {
+        phase: 'patterns',
+        status: 'warn',
+        duration_ms: 0,
+        summary: `${writtenRefs.length} pattern page(s) written but subagent job ${job.id} ended '${outcome}'`,
+        details,
+      };
+    }
+
+    return ok(`${writtenRefs.length} pattern page(s) written/updated (${outcome})`, details);
   } catch (e) {
     return failed(makeError('InternalError', 'PATTERNS_PHASE_FAIL',
       e instanceof Error ? (e.message || 'patterns phase threw') : String(e)));
@@ -140,6 +187,20 @@ interface PatternsConfig {
   model: string;
   /** #2415: shared output namespace (dream.synthesize.output_root, default 'wiki'). */
   outputRoot: string;
+  /** #1594-family: subagent job timeout, config `dream.patterns.subagent_timeout_ms`. */
+  subagentTimeoutMs: number;
+  /** #1594-family: waitForCompletion timeout, config `dream.patterns.subagent_wait_timeout_ms`. */
+  subagentWaitTimeoutMs: number;
+}
+
+const DEFAULT_PATTERNS_SUBAGENT_TIMEOUT_MS = 30 * 60 * 1000;
+const DEFAULT_PATTERNS_SUBAGENT_WAIT_TIMEOUT_MS = 35 * 60 * 1000;
+
+async function getNumberConfig(engine: BrainEngine, key: string, fallback: number): Promise<number> {
+  const raw = await engine.getConfig(key);
+  if (raw === undefined || raw === null) return fallback;
+  const value = Number(raw);
+  return Number.isNaN(value) ? fallback : value;
 }
 
 async function loadPatternsConfig(engine: BrainEngine): Promise<PatternsConfig> {
@@ -161,6 +222,12 @@ async function loadPatternsConfig(engine: BrainEngine): Promise<PatternsConfig> 
     minEvidence: minEvidenceStr ? Math.max(1, parseInt(minEvidenceStr, 10) || 3) : 3,
     model,
     outputRoot: await loadOutputRoot(engine),
+    subagentTimeoutMs: await getNumberConfig(
+      engine, 'dream.patterns.subagent_timeout_ms', DEFAULT_PATTERNS_SUBAGENT_TIMEOUT_MS,
+    ),
+    subagentWaitTimeoutMs: await getNumberConfig(
+      engine, 'dream.patterns.subagent_wait_timeout_ms', DEFAULT_PATTERNS_SUBAGENT_WAIT_TIMEOUT_MS,
+    ),
   };
 }
 

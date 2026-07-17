@@ -20,6 +20,7 @@ import {
   loadCheckpoint,
   saveCheckpoint,
   clearCheckpoint,
+  resolveImportTargetDir,
   resumeFilter,
 } from '../core/import-checkpoint.ts';
 
@@ -168,7 +169,19 @@ export async function runImport(
     console.error('Usage: gbrain import <dir> [--no-embed] [--workers N] [--fresh] [--source-id <id>] [--json]');
     process.exit(1);
   }
-  const dir: string = dirArg;  // narrowed; survives closure capture
+  // #1728: capture the import target ONCE as an absolute real path. Every
+  // downstream consumer of `dir` (collection, checkpoint load/save, resume
+  // filtering) sees the same canonical identity — never the caller's `.`/
+  // relative spelling, which would make the persisted checkpoint `dir`
+  // resolve against whatever CWD a later process happens to run from.
+  let dir: string;
+  try {
+    dir = resolveImportTargetDir(dirArg);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error(`Import target is not readable: ${dirArg} (${msg})`);
+    process.exit(1);
+  }
 
   // v0.31.2: collect under the right strategy. Pre-fix this called
   // collectMarkdownFiles unconditionally — code-strategy first sync
@@ -288,6 +301,9 @@ export async function runImport(
         catch { /* non-fatal */ }
       }
       saveCheckpoint(checkpointPath, {
+        schema_version: 1,
+        owner: 'gbrain',
+        kind: 'import',
         dir,
         completedPaths: Array.from(completed),
         timestamp: new Date().toISOString(),
