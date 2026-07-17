@@ -27,6 +27,8 @@ import { waitForCompletion, TimeoutError } from '../minions/wait-for-completion.
 import type { MinionJobInput, SubagentHandlerData } from '../minions/types.ts';
 import { serializeMarkdown } from '../markdown.ts';
 import type { Page, PageType } from '../types.ts';
+import { probeChatModel } from '../ai/gateway.ts';
+import { normalizeModelId } from '../model-id.ts';
 
 export interface PatternsPhaseOpts {
   brainDir: string;
@@ -63,9 +65,20 @@ export async function runPhasePatterns(
       });
     }
 
-    // Submit one subagent for pattern detection.
-    if (!process.env.ANTHROPIC_API_KEY) {
-      return skipped('no_api_key', 'ANTHROPIC_API_KEY unset; pattern detection skipped');
+    // Submit one subagent for pattern detection. The subagent dispatches via
+    // the gateway model-tier resolver, so gate on "is the resolved model's
+    // provider reachable" rather than ANTHROPIC_API_KEY specifically — a
+    // hardcoded env gate misclassified non-Anthropic stacks (litellm,
+    // deepseek, openrouter, ...) as "no upstream" even though the subagent
+    // routes them through the gateway (agent.use_gateway_loop), and it missed
+    // Anthropic keys set via `gbrain config set anthropic_api_key`. Same
+    // probe semantics as think/index.ts + synthesize's makeJudgeClient:
+    // unknown provider/model or Anthropic-without-key skips cheaply; other
+    // providers' auth is checked lazily at dispatch and surfaces in the job
+    // outcome. (Takeover of PR #2279's intent by @brettdavies.)
+    const probe = probeChatModel(normalizeModelId(config.model));
+    if (!probe.ok) {
+      return skipped('no_provider', `pattern detection skipped: ${probe.detail}`);
     }
 
     const allowedSlugPrefixes = await loadAllowedSlugPrefixes();
