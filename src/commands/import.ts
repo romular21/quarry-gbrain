@@ -569,10 +569,21 @@ function isCollectibleForWalker(
   strategy: SyncStrategy,
   multimodalOn: boolean,
 ): boolean {
+  // #2607: apply the SAME segment-level prune gate as incremental sync's
+  // `classifySync` (core/sync.ts). The FS walk below prunes at descent time,
+  // but the git fast path enumerates via `git ls-files` and historically
+  // filtered only by extension — so `sync --full` imported (and resurrected
+  // previously-deleted) pages under dot-dirs / vendored trees that incremental
+  // sync excludes. Full and incremental must agree on the exclusion set.
+  // (In the FS-walk route `path` is a basename, so this is the same dot-file
+  // check pruneDir already applied there — no behavior change on that route.)
+  const segments = path.split('/');
+  if (segments.some((seg) => !pruneDir(seg))) return false;
+
   // Metafiles are directory scaffolding (READMEs / index / log / schema /
   // resolver), not typed brain pages — same exclusion `sync`'s `isSyncable`
   // applies. Guards both the FS-walk and the git-fast-path collection routes.
-  const basename = path.split('/').pop() || '';
+  const basename = segments[segments.length - 1] || '';
   if ((SYNC_SKIP_FILES as readonly string[]).includes(basename)) return false;
 
   switch (strategy) {

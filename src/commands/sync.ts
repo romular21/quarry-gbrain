@@ -2010,7 +2010,13 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
   const pageOpts = opts.sourceId ? { sourceId: opts.sourceId } : undefined;
   for (const path of unsyncableModified) {
     // v0.41.13 #1433: never delete on metafile classification.
-    if (unsyncableReason(path, syncOpts) === 'metafile') continue;
+    // #2404 hardening: same for 'pruned-dir' — a page under a pruned
+    // directory can only exist via a deliberate put_page (sync never
+    // imports those paths), so "the file was modified" is not evidence
+    // the page is stale. Deleting here silently destroyed put-created
+    // pages every time their materialized file landed in a commit.
+    const reason = unsyncableReason(path, syncOpts);
+    if (reason === 'metafile' || reason === 'pruned-dir') continue;
     const slug = await resolveSlugByPathOrSourcePath(engine, path, opts.sourceId);
     try {
       const existing = await engine.getPage(slug, pageOpts);
@@ -3321,9 +3327,45 @@ async function performFullSync(
         `GBRAIN_ALLOW_MASS_RECONCILE=1 to restore the old behavior.`,
       );
     } else if (plan.staleSlugs.length > 0) {
+      // #2426: a stale page whose source_path was NEVER committed to git is
+      // DB-only write-through (the file was written into the clone but never
+      // committed/pushed, then lost — e.g. a fresh clone). "Absent from git"
+      // is the SYMPTOM of that bug, not evidence the content is disposable.
+      // Keep those pages and re-export their markdown to the working tree so
+      // they're file-backed again; only pages whose file once existed in git
+      // history (i.e. was genuinely deleted) are reconcile-deleted.
+      const everCommitted = listEverCommittedPaths(repoPath);
+      const pathBySlug = new Map(rows.map(r => [r.slug, r.source_path]));
+      let deletableSlugs = plan.staleSlugs;
+      const dbOnlySlugs: string[] = [];
+      if (everCommitted) {
+        deletableSlugs = [];
+        for (const slug of plan.staleSlugs) {
+          const sp = pathBySlug.get(slug);
+          if (sp && !everCommitted.has(sp.replace(/\\/g, '/'))) dbOnlySlugs.push(slug);
+          else deletableSlugs.push(slug);
+        }
+      }
+      if (dbOnlySlugs.length > 0) {
+        let reExported = 0;
+        try {
+          const { writePageThrough } = await import('../core/write-through.ts');
+          for (const slug of dbOnlySlugs) {
+            const r = await writePageThrough(engine, slug, { sourceId: sid });
+            if (r.written) reExported++;
+          }
+        } catch { /* best-effort — pages are preserved either way */ }
+        serr(
+          `\n  Kept ${dbOnlySlugs.length} page(s) whose markdown was never committed to git ` +
+          `(DB-only write-through — not deleting).` +
+          (reExported > 0 ? ` Re-exported ${reExported} of them to the working tree.` : '') +
+          `\n  Commit + push them (e.g. scripts/brain-commit-push.sh, or 'gbrain sources harden') ` +
+          `so the next sync sees them as file-backed.`,
+        );
+      }
       const deleteScopedOpts = { sourceId: sid };
-      for (let i = 0; i < plan.staleSlugs.length; i += DELETE_BATCH_SIZE) {
-        const batch = plan.staleSlugs.slice(i, i + DELETE_BATCH_SIZE);
+      for (let i = 0; i < deletableSlugs.length; i += DELETE_BATCH_SIZE) {
+        const batch = deletableSlugs.slice(i, i + DELETE_BATCH_SIZE);
         try {
           const deleted = await engine.deletePages(batch, deleteScopedOpts);
           reconciledDeletes += deleted.length;
@@ -3440,6 +3482,34 @@ export function planReconcileDeletes(
     reconcilable.length > MASS_RECONCILE_MIN_PAGES &&
     staleSlugs.length > reconcilable.length * MASS_RECONCILE_RATIO;
   return { staleSlugs, reconcilableCount: reconcilable.length, massDelete };
+}
+
+/**
+ * #2426: every repo-relative path that ever appeared as an ADD in git history
+ * (rename detection off, so a `git mv` destination still counts as an add).
+ * Used by the full-sync reconcile to distinguish "file was committed and later
+ * deleted" (genuine delete → reconcile) from "file was NEVER committed"
+ * (DB-only write-through → preserve). Returns null when `repoPath` isn't a git
+ * work tree or git is unavailable — callers keep the plain-directory behavior.
+ * Forward-slash-normalized to match `normalizeReconcilePath` membership tests.
+ */
+export function listEverCommittedPaths(repoPath: string): Set<string> | null {
+  let stdout: string;
+  try {
+    stdout = execFileSync(
+      'git',
+      ['-C', repoPath, '-c', 'core.quotepath=off', 'log', '--all', '--no-renames',
+        '--diff-filter=A', '--format=', '--name-only'],
+      { encoding: 'utf8', maxBuffer: 512 * 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'] },
+    );
+  } catch {
+    return null;
+  }
+  const set = new Set<string>();
+  for (const line of stdout.split('\n')) {
+    if (line) set.add(line.replace(/\\/g, '/'));
+  }
+  return set;
 }
 
 /**
