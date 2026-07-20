@@ -11,6 +11,8 @@ describe('search op — explicit result sizing controls', () => {
     expect(search.params.token_budget?.type).toBe('number');
     expect(search.params.autocut?.type).toBe('boolean');
     expect(search.params.adaptive_return?.type).toBe('boolean');
+    expect(search.params.autocut?.description).toContain('keyword-only');
+    expect(search.params.adaptive_return?.description).toContain('keyword-only');
   });
 
   test('threads the controls to hybridSearchCached while expansion stays off', async () => {

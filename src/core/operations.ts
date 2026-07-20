@@ -1449,11 +1449,11 @@ const search: Operation = {
     },
     adaptive_return: {
       type: 'boolean',
-      description: 'Optional adaptive result sizing override. Pass false to preserve the requested breadth.',
+      description: 'Optional hybrid-search adaptive result sizing override; ignored in operator keyword-only mode. Pass false to preserve the requested breadth.',
     },
     autocut: {
       type: 'boolean',
-      description: 'Optional reranker cliff-cut override. Pass false to preserve the requested breadth.',
+      description: 'Optional hybrid-search reranker cliff-cut override; ignored in operator keyword-only mode. Pass false to preserve the requested breadth.',
     },
   },
   handler: async (ctx, p) => {
