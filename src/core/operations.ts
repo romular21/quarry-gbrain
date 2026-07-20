@@ -511,6 +511,7 @@ export function linkReadScopeOpts(ctx: OperationContext): { sourceId?: string; s
  *       remote                           → the caller's grant (sourceScopeOpts)
  *   - explicit `source_id`:
  *       remote + federated grant that doesn't include it → permission_denied
+ *       remote + scalar grant that differs from it        → permission_denied
  *       otherwise                                        → `{ sourceId }`
  *   - neither → the caller's grant (sourceScopeOpts).
  *
@@ -528,7 +529,12 @@ export function resolveRequestedScope(
   }
   if (sourceIdParam !== undefined) {
     const allowed = ctx.auth?.allowedSources;
-    if (ctx.remote !== false && allowed && allowed.length > 0 && !allowed.includes(sourceIdParam)) {
+    const outsideRemoteGrant = ctx.remote !== false && (
+      allowed && allowed.length > 0
+        ? !allowed.includes(sourceIdParam)
+        : sourceIdParam !== ctx.sourceId
+    );
+    if (outsideRemoteGrant) {
       throw new OperationError(
         'permission_denied',
         `source '${sourceIdParam}' is outside your granted sources`,

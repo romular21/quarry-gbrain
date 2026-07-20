@@ -118,4 +118,22 @@ describe('search op — per-call source scope', () => {
 
     expect(engineCalls).toBe(0);
   });
+
+  test('scalar-grant caller cannot replace its source_id', async () => {
+    let engineCalls = 0;
+    const ctx = context({
+      getConfig: async () => {
+        engineCalls += 1;
+        return 'false';
+      },
+    }, []);
+    ctx.sourceId = 'telegram-gtdqi';
+
+    await expect(search.handler(ctx, {
+      query: 'forbidden scalar override',
+      source_id: 'telegram-t6str',
+    })).rejects.toMatchObject({ code: 'permission_denied' } satisfies Partial<OperationError>);
+
+    expect(engineCalls).toBe(0);
+  });
 });

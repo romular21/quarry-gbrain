@@ -91,12 +91,18 @@ describe('resolveRequestedScope — explicit source_id', () => {
     expect(resolveRequestedScope(ctxOf({ remote: false }), 'anything')).toEqual({ sourceId: 'anything' });
   });
 
-  test('remote with no federated grant array can pass an explicit source_id (scalar-floor model)', () => {
-    // allowedSources undefined → no federated restriction to enforce; the scalar
-    // sourceId path governs. (Empty [] is treated the same as undefined.)
-    expect(resolveRequestedScope(ctxOf({ remote: true }), 'z')).toEqual({ sourceId: 'z' });
-    const emptyGrant = ctxOf({ remote: true, auth: { token: 't', clientId: 'c', scopes: [], allowedSources: [] } as any });
+  test('remote with no federated grant may request only its scalar source floor', () => {
+    const scalar = ctxOf({ remote: true, sourceId: 'z' });
+    expect(resolveRequestedScope(scalar, 'z')).toEqual({ sourceId: 'z' });
+    expect(() => resolveRequestedScope(scalar, 'other')).toThrow(OperationError);
+
+    const emptyGrant = ctxOf({
+      remote: true,
+      sourceId: 'z',
+      auth: { token: 't', clientId: 'c', scopes: [], allowedSources: [] } as any,
+    });
     expect(resolveRequestedScope(emptyGrant, 'z')).toEqual({ sourceId: 'z' });
+    expect(() => resolveRequestedScope(emptyGrant, 'other')).toThrow(OperationError);
   });
 });
 
