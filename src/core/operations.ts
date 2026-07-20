@@ -511,6 +511,7 @@ export function linkReadScopeOpts(ctx: OperationContext): { sourceId?: string; s
  *       remote                           → the caller's grant (sourceScopeOpts)
  *   - explicit `source_id`:
  *       remote + federated grant that doesn't include it → permission_denied
+ *       remote + scalar grant that differs from it        → permission_denied
  *       otherwise                                        → `{ sourceId }`
  *   - neither → the caller's grant (sourceScopeOpts).
  *
@@ -528,7 +529,12 @@ export function resolveRequestedScope(
   }
   if (sourceIdParam !== undefined) {
     const allowed = ctx.auth?.allowedSources;
-    if (ctx.remote !== false && allowed && allowed.length > 0 && !allowed.includes(sourceIdParam)) {
+    const outsideRemoteGrant = ctx.remote !== false && (
+      allowed && allowed.length > 0
+        ? !allowed.includes(sourceIdParam)
+        : sourceIdParam !== ctx.sourceId
+    );
+    if (outsideRemoteGrant) {
       throw new OperationError(
         'permission_denied',
         `source '${sourceIdParam}' is outside your granted sources`,
@@ -1440,6 +1446,11 @@ const search: Operation = {
   description: SEARCH_DESCRIPTION,
   params: {
     query: { type: 'string', required: true },
+    source_id: {
+      type: 'string',
+      description:
+        "Scope search to one source within the caller's grant. Omit to search every granted source.",
+    },
     limit: { type: 'number', description: 'Max results (default 20)' },
     offset: { type: 'number', description: 'Skip first N results (for pagination)' },
     mode: { type: 'string', description: 'Search mode (conservative|balanced|tokenmax). Local callers only.' },
@@ -1461,7 +1472,11 @@ const search: Operation = {
     const queryText = p.query as string;
     const limit = (p.limit as number) || 20;
     const offset = (p.offset as number) || 0;
-    const scope = sourceScopeOpts(ctx);
+    // Per-call source selection must pass through the shared trust + grant
+    // resolver before any config, provider, or engine work. Omission preserves
+    // the existing full-grant behavior; an out-of-grant request fails closed.
+    const sourceIdParam = typeof p.source_id === 'string' ? p.source_id : undefined;
+    const scope = resolveRequestedScope(ctx, sourceIdParam);
 
     // T4/D5 — per-call mode honored ONLY for trusted/local callers so a remote
     // OAuth client can't escalate to the costly tokenmax bundle. Local + unknown
