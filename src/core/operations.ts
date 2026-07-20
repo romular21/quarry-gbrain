@@ -14,6 +14,7 @@ import { writePageThrough } from './write-through.ts';
 import { hybridSearch, hybridSearchCached, stampContentFlags } from './search/hybrid.ts';
 import { expandQuery } from './search/expansion.ts';
 import { dedupResults } from './search/dedup.ts';
+import { enforceTokenBudget } from './search/token-budget.ts';
 import { captureEvalCandidate, isEvalCaptureEnabled, isEvalScrubEnabled } from './eval-capture.ts';
 import type { HybridSearchMeta } from './types.ts';
 import { extractPageLinks, isAutoLinkEnabled, isAutoTimelineEnabled, isGlobalBasenameEnabled, parseTimelineEntries, makeResolver, type UnresolvedFrontmatterRef } from './link-extraction.ts';
@@ -1442,6 +1443,18 @@ const search: Operation = {
     limit: { type: 'number', description: 'Max results (default 20)' },
     offset: { type: 'number', description: 'Skip first N results (for pagination)' },
     mode: { type: 'string', description: 'Search mode (conservative|balanced|tokenmax). Local callers only.' },
+    token_budget: {
+      type: 'number',
+      description: 'Optional result token budget. Pass 0 to disable token-budget truncation.',
+    },
+    adaptive_return: {
+      type: 'boolean',
+      description: 'Optional hybrid-search adaptive result sizing override; ignored in operator keyword-only mode. Pass false to preserve the requested breadth.',
+    },
+    autocut: {
+      type: 'boolean',
+      description: 'Optional hybrid-search reranker cliff-cut override; ignored in operator keyword-only mode. Pass false to preserve the requested breadth.',
+    },
   },
   handler: async (ctx, p) => {
     const startedAt = Date.now();
@@ -1462,7 +1475,11 @@ const search: Operation = {
 
     if (keywordOnly) {
       const raw = await ctx.engine.searchKeyword(queryText, { limit, offset, ...scope });
-      const results = dedupResults(raw);
+      const deduped = dedupResults(raw);
+      const { results } = enforceTokenBudget(
+        deduped,
+        typeof p.token_budget === 'number' ? (p.token_budget as number) : undefined,
+      );
       stampEvidenceSafe(results);
       // #1699: the keyword-only opt-out must STILL surface the content_flag
       // agent-warning channel (hybridSearch stamps it; this branch bypasses
@@ -1482,6 +1499,9 @@ const search: Operation = {
       expansion: false,
       ...scope,
       ...(perCallMode ? { mode: perCallMode } : {}),
+      tokenBudget: typeof p.token_budget === 'number' ? (p.token_budget as number) : undefined,
+      adaptiveReturn: typeof p.adaptive_return === 'boolean' ? (p.adaptive_return as boolean) : undefined,
+      autocut: typeof p.autocut === 'boolean' ? (p.autocut as boolean) : undefined,
       onMeta: (m) => { capturedMeta = m; },
     });
     const latency_ms = Date.now() - startedAt;

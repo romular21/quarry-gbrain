@@ -36,9 +36,11 @@ describe('query op — autocut agent surface', () => {
     expect(desc).toContain('adaptive_return');
   });
 
-  test('search op (keyword-only) does NOT carry autocut (no reranker there)', () => {
+  test('search op carries the explicit breadth override used by bounded callers', () => {
     const search = operationsByName['search'];
     expect(search).toBeDefined();
-    expect(search.params?.autocut).toBeUndefined();
+    expect(search.params?.autocut?.type).toBe('boolean');
+    expect(search.params?.autocut?.description?.toLowerCase()).toContain('false');
+    expect(search.params?.autocut?.description?.toLowerCase()).toContain('breadth');
   });
 });
