@@ -1442,6 +1442,18 @@ const search: Operation = {
     limit: { type: 'number', description: 'Max results (default 20)' },
     offset: { type: 'number', description: 'Skip first N results (for pagination)' },
     mode: { type: 'string', description: 'Search mode (conservative|balanced|tokenmax). Local callers only.' },
+    token_budget: {
+      type: 'number',
+      description: 'Optional result token budget. Pass 0 to disable token-budget truncation.',
+    },
+    adaptive_return: {
+      type: 'boolean',
+      description: 'Optional adaptive result sizing override. Pass false to preserve the requested breadth.',
+    },
+    autocut: {
+      type: 'boolean',
+      description: 'Optional reranker cliff-cut override. Pass false to preserve the requested breadth.',
+    },
   },
   handler: async (ctx, p) => {
     const startedAt = Date.now();
@@ -1482,6 +1494,9 @@ const search: Operation = {
       expansion: false,
       ...scope,
       ...(perCallMode ? { mode: perCallMode } : {}),
+      tokenBudget: typeof p.token_budget === 'number' ? (p.token_budget as number) : undefined,
+      adaptiveReturn: typeof p.adaptive_return === 'boolean' ? (p.adaptive_return as boolean) : undefined,
+      autocut: typeof p.autocut === 'boolean' ? (p.autocut as boolean) : undefined,
       onMeta: (m) => { capturedMeta = m; },
     });
     const latency_ms = Date.now() - startedAt;
