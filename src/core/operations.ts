@@ -14,6 +14,7 @@ import { writePageThrough } from './write-through.ts';
 import { hybridSearch, hybridSearchCached, stampContentFlags } from './search/hybrid.ts';
 import { expandQuery } from './search/expansion.ts';
 import { dedupResults } from './search/dedup.ts';
+import { enforceTokenBudget } from './search/token-budget.ts';
 import { captureEvalCandidate, isEvalCaptureEnabled, isEvalScrubEnabled } from './eval-capture.ts';
 import type { HybridSearchMeta } from './types.ts';
 import { extractPageLinks, isAutoLinkEnabled, isAutoTimelineEnabled, isGlobalBasenameEnabled, parseTimelineEntries, makeResolver, type UnresolvedFrontmatterRef } from './link-extraction.ts';
@@ -1474,7 +1475,11 @@ const search: Operation = {
 
     if (keywordOnly) {
       const raw = await ctx.engine.searchKeyword(queryText, { limit, offset, ...scope });
-      const results = dedupResults(raw);
+      const deduped = dedupResults(raw);
+      const { results } = enforceTokenBudget(
+        deduped,
+        typeof p.token_budget === 'number' ? (p.token_budget as number) : undefined,
+      );
       stampEvidenceSafe(results);
       // #1699: the keyword-only opt-out must STILL surface the content_flag
       // agent-warning channel (hybridSearch stamps it; this branch bypasses

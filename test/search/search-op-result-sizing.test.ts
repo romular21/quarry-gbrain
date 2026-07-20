@@ -61,4 +61,32 @@ describe('search op — explicit result sizing controls', () => {
     expect(bounded.results).toEqual(results as unknown as SearchResult[]);
     expect(bounded.meta).toMatchObject({ budget: 0, kept: 1, dropped: 0 });
   });
+
+  test('token budget is also enforced in operator keyword-only mode', async () => {
+    const ctx = {
+      engine: {
+        getConfig: async (key: string) => key === 'search.mcp_keyword_only' ? 'true' : 'false',
+        searchKeyword: async () => [
+          { slug: 'msg-first', chunk_text: '12345678', score: 1 },
+          { slug: 'msg-second', chunk_text: 'abcdefgh', score: 0.5 },
+        ],
+      },
+      config: { engine: 'pglite', eval: { capture: false, scrub_pii: true } },
+      logger: console,
+      dryRun: false,
+      remote: true,
+      sourceId: 'default',
+    } as unknown as OperationContext;
+
+    const results = await search.handler(ctx, {
+      query: 'bounded keyword result set',
+      limit: 50,
+      offset: 0,
+      token_budget: 2,
+      autocut: false,
+      adaptive_return: false,
+    }) as SearchResult[];
+
+    expect(results.map((result) => result.slug)).toEqual(['msg-first']);
+  });
 });
