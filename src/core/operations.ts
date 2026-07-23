@@ -505,9 +505,9 @@ export function linkReadScopeOpts(ctx: OperationContext): { sourceId?: string; s
  * Resolve a per-call requested source scope against the caller's trust + grant.
  * FAIL-CLOSED: anything not strictly `ctx.remote === false` is untrusted.
  *
- * This is the SINGLE resolver for every read op that accepts a per-call
+ * This is the SINGLE resolver for every op that accepts a per-call
  * `source_id` / `all_sources` parameter (query, code_callers, code_callees,
- * get_page, search_by_image, code_blast, code_flow). Inlining the `__all__`
+ * get_page, search_by_image, code_blast, code_flow, search, think). Inlining the `__all__`
  * branch per handler is the bug class that leaked cross-source reads (#1924,
  * #1371): a remote client could pass `source_id: '__all__'` to opt out of its
  * grant, or pass an explicit out-of-grant `source_id` that was never checked.
@@ -1903,10 +1903,12 @@ const think: Operation = {
     const safeSave = remote ? false : Boolean(p.save);
     const safeTake = remote ? false : Boolean(p.take);
     // v0.40.2.0: thread source-scope scalars + remote flag for trajectory
-    // injection. `sourceScopeOpts(ctx)` returns the federated array (when
-    // present) OR the scalar; we pass both through to runThink which
-    // forwards to findTrajectory. CLI callers don't go through this op
-    // and get default scope + remote=false from runThink's CLI path.
+    // injection. `thinkSourceScopeOpts(ctx, requestedSourceId)` resolves the
+    // per-call source_id against the caller's grant and returns either a scalar
+    // sourceId, a federated allowedSources array, or an empty scope; we pass
+    // that through to runThink which forwards to findTrajectory. CLI callers
+    // don't go through this op and get default scope + remote=false from
+    // runThink's CLI path.
     // Quarry G1: optional per-call source_id is resolved against the caller's
     // grant before runThink so out-of-grant sources fail before retrieval.
     const requestedSourceIdRaw = p.source_id !== undefined ? String(p.source_id) : undefined;
