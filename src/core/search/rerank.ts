@@ -37,6 +37,12 @@ export interface RerankerOpts {
    * Production must NEVER set this.
    */
   rerankerFn?: (input: RerankInput) => Promise<RerankResult[]>;
+  /**
+   * Opaque Quarry operation id (32 lowercase hex) threaded to the paid-call
+   * usage audit for cross-system correlation. Used ONLY for the audit — never
+   * in ranking or cache identity.
+   */
+  operationId?: string;
 }
 
 /** SHA-256 prefix (8 chars) of the query text for privacy-preserving audit. */
@@ -79,8 +85,13 @@ export async function applyReranker(
     reranked = await rerankerFn({
       query,
       documents,
+      // Score EVERY candidate in the head — top_n = documents.length — so a
+      // well-behaved provider returns a COMPLETE permutation. Guarantees a
+      // score for the whole input instead of relying on an omission default.
+      topN: documents.length,
       timeoutMs: opts.timeoutMs,
       ...(opts.model ? { model: opts.model } : {}),
+      ...(opts.operationId ? { operationId: opts.operationId } : {}),
     });
   } catch (err) {
     const reason: RerankFailureReason =
@@ -100,35 +111,45 @@ export async function applyReranker(
     return results;
   }
 
-  // Defensive: if the reranker returned a malformed shape, pass through.
-  if (!Array.isArray(reranked) || reranked.length === 0) return results;
+  // Full-permutation-or-fail-open (Quarry Q2/G2). We asked for a score per
+  // candidate (top_n = documents.length), so we require a COMPLETE permutation:
+  // exactly one result per head item. A short/partial response would otherwise
+  // produce a head that mixes reranked and un-reranked rows with only some
+  // rerank_score populated — so anything but a full permutation fails open to
+  // the unchanged RRF order.
+  if (!Array.isArray(reranked) || reranked.length !== head.length) return results;
 
-  // Build the reordered head. We keep ONLY indices the reranker returned
-  // (so a top_n response with fewer items than head.length naturally
-  // drops the missing ones — but since we don't pass top_n by default,
-  // every input gets a score).
+  // Validate the permutation BEFORE mutating any result. `head` is a slice of
+  // `results` (shared object references), so stamping a score and then bailing
+  // would leak partial scores onto the returned RRF order. Two-phase — validate
+  // first, mutate only once the whole response is proven a unique, in-range,
+  // integer, finite-score permutation — guarantees fail-open leaves results
+  // byte-identical. (gateway.rerank already enforces this; the check keeps the
+  // apply safe even against a test seam or a future gateway relaxation.)
   const seen = new Set<number>();
+  for (const r of reranked) {
+    if (
+      !Number.isInteger(r.index) || r.index < 0 || r.index >= head.length ||
+      seen.has(r.index) || !Number.isFinite(r.relevanceScore)
+    ) {
+      return results;
+    }
+    seen.add(r.index);
+  }
+
+  // Safe apply: every index is a validated unique integer in range, so
+  // head[r.index] is always defined — no unguarded deref can throw.
   const reorderedHead: SearchResult[] = [];
   for (const r of reranked) {
-    if (r.index >= 0 && r.index < head.length && !seen.has(r.index)) {
-      seen.add(r.index);
-      const item = head[r.index]!;
-      // Stamp the reranker score onto the result so downstream callers
-      // (telemetry, debug, autocut) can see the new ordering signal. Doesn't
-      // replace `score` — that's RRF and other consumers may depend on it.
-      item.rerank_score = r.relevanceScore;
-      // v0.40.4 attribution stamp (D12=A) — rank delta. Positive means
-      // rank improved (moved closer to top). new_index is the next
-      // push position in reorderedHead; original index was r.index.
-      item.reranker_delta = r.index - reorderedHead.length;
-      reorderedHead.push(item);
-    }
-  }
-  // If the reranker dropped some head items (rare; usually only happens
-  // with explicit top_n), preserve their original positions at the end
-  // of the head section so we don't silently lose recall.
-  for (let i = 0; i < head.length; i++) {
-    if (!seen.has(i)) reorderedHead.push(head[i]!);
+    const item = head[r.index]!;
+    // Stamp the reranker score so downstream (telemetry, debug, autocut) sees
+    // the new ordering signal. Does NOT replace `score` (RRF; other consumers
+    // may depend on it).
+    item.rerank_score = r.relevanceScore;
+    // v0.40.4 attribution stamp (D12=A) — rank delta. Positive means rank
+    // improved (moved closer to top).
+    item.reranker_delta = r.index - reorderedHead.length;
+    reorderedHead.push(item);
   }
 
   const combined = [...reorderedHead, ...tail];

@@ -23,8 +23,9 @@
 
 import { embed as aiEmbed, embedMany, generateObject, generateText, jsonSchema } from 'ai';
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { listRecipes } from './recipes/index.ts';
+import { logRerankUsage, type RerankUsageStatus } from '../rerank-usage-audit.ts';
 import { createOpenAI } from '@ai-sdk/openai';
 import { createGoogleGenerativeAI } from '@ai-sdk/google';
 import { createAnthropic } from '@ai-sdk/anthropic';
@@ -3447,6 +3448,13 @@ export interface RerankInput {
   signal?: AbortSignal;
   /** Timeout in ms (default 5000). Search hot path; long stalls degrade UX. */
   timeoutMs?: number;
+  /**
+   * Opaque Quarry operation id (32 lowercase hex) for paid-call audit
+   * correlation. Used ONLY for the usage audit — never in ranking or cache
+   * keys. A value that is not exactly 32 lowercase hex is recorded as null
+   * (the authoritative loud-reject happens at the MCP search-op boundary).
+   */
+  operationId?: string;
 }
 
 export interface RerankResult {
@@ -3569,6 +3577,45 @@ export async function rerank(input: RerankInput): Promise<RerankResult[]> {
     );
   }
 
+  // ---- Paid-call usage audit (Quarry Q2/G2) ----
+  // Record the reranker DISPATCH lifecycle so a billed call is never silently
+  // lost. Correlated by an opaque call_id + optional Quarry operation_id.
+  // Placed AFTER the payload-too-large guard so a pre-flight reject (never
+  // dispatched, never billed) writes no rows. Never stores query/document
+  // text; best-effort — never throws into search.
+  const _callId = randomUUID().replace(/-/g, '');
+  const _opId =
+    typeof input.operationId === 'string' && /^[0-9a-f]{32}$/.test(input.operationId)
+      ? input.operationId
+      : null;
+  const _costPerSearch = typeof tp.cost_per_search_usd === 'number' ? tp.cost_per_search_usd : null;
+  const _priceRev = tp.price_last_verified ?? null;
+  let _terminalLogged = false;
+  const _audit = (
+    status: RerankUsageStatus,
+    over: { search_units?: number | null; estimated_cost_usd?: number | null; failure_reason?: string | null } = {},
+  ): void => {
+    try {
+      logRerankUsage({
+        call_id: _callId,
+        operation_id: _opId,
+        operation_kind: 'rerank',
+        provider: recipe.id,
+        model: parsed.modelId,
+        status,
+        document_count: input.documents.length,
+        search_units: over.search_units ?? null,
+        estimated_cost_usd: over.estimated_cost_usd ?? null,
+        price_card_revision: _priceRev,
+        failure_reason: over.failure_reason ?? null,
+      });
+    } catch {
+      // Audit is a best-effort trace; never break search.
+    }
+    if (status === 'succeeded' || status === 'failed' || status === 'cancelled') _terminalLogged = true;
+  };
+  _audit('pending');
+
   // Build headers from resolveAuth (default applies Bearer-style header).
   const headers = new Headers(authHeaders);
   headers.set('Content-Type', 'application/json');
@@ -3601,6 +3648,10 @@ export async function rerank(input: RerankInput): Promise<RerankResult[]> {
   };
   try {
     const transport: RerankTransport = _rerankTransport ?? ((u, init) => fetch(u, init));
+    // About to hit the wire — a crash after this point may leave a billed call
+    // whose outcome we never observed. The 'unknown-after-dispatch' row is that
+    // marker; a terminal row supersedes it when the outcome is known.
+    _audit('unknown-after-dispatch');
     const resp = await transport(url, {
       method: 'POST',
       headers,
@@ -3626,17 +3677,60 @@ export async function rerank(input: RerankInput): Promise<RerankResult[]> {
       throw new RerankError(msg, reason, resp.status);
     }
     const json: any = await resp.json();
+    // HTTP 200 ⟹ the provider processed the request (billed). Record the paid
+    // call — with provider usage when present — BEFORE validating the result
+    // shape, so a malformed-but-billed response is never erased from the audit
+    // even though the caller then fails open. search_units stays null (never 0)
+    // when the provider returns no usage; estimated cost is search_units × the
+    // per-search price card, or null when no price card is declared.
+    const _searchUnits =
+      json && json.usage && typeof json.usage.search_units === 'number' && Number.isFinite(json.usage.search_units)
+        ? (json.usage.search_units as number)
+        : null;
+    const _estCost =
+      _costPerSearch !== null ? Number(((_searchUnits ?? 1) * _costPerSearch).toFixed(6)) : null;
+    _audit('succeeded', { search_units: _searchUnits, estimated_cost_usd: _estCost });
+
     if (!json || !Array.isArray(json.results)) {
       throw new RerankError('rerank: malformed response (no results array)', 'unknown');
     }
-    const mapped = json.results.map((r: any) => ({
-      index: typeof r.index === 'number' ? r.index : 0,
-      relevanceScore: typeof r.relevance_score === 'number' ? r.relevance_score : 0,
-    }));
+    // Strict per-item validation (Quarry Q2/G2). Every result must carry an
+    // INTEGER index in [0, documents.length), unique across the response, and a
+    // FINITE relevance score. Anything else is malformed → throw so
+    // applyReranker fails open to the unchanged hybrid order. Replaces the prior
+    // soft coercion (non-number → 0), which could silently corrupt the
+    // reordering or, for a fractional index, throw an unguarded head[idx] deref
+    // downstream.
+    const _n = input.documents.length;
+    const _seen = new Set<number>();
+    const mapped: RerankResult[] = [];
+    for (const r of json.results as Array<{ index?: unknown; relevance_score?: unknown }>) {
+      const idx = r?.index;
+      const score = r?.relevance_score;
+      if (
+        typeof idx !== 'number' || !Number.isInteger(idx) || idx < 0 || idx >= _n || _seen.has(idx) ||
+        typeof score !== 'number' || !Number.isFinite(score)
+      ) {
+        throw new RerankError('rerank: malformed result (bad index or score)', 'unknown');
+      }
+      _seen.add(idx);
+      mapped.push({ index: idx, relevanceScore: score });
+    }
     _rerankRecord();
     return mapped;
   } catch (err) {
     _rerankRecord();
+    // Terminal paid-call audit — only when we hadn't already logged 'succeeded'
+    // (a malformed-but-200 response logs succeeded first, then throws here).
+    if (!_terminalLogged) {
+      const reason =
+        err instanceof RerankError
+          ? err.reason
+          : err && typeof err === 'object' && (err as any).name === 'AbortError'
+          ? 'timeout'
+          : 'network';
+      _audit(reason === 'timeout' ? 'cancelled' : 'failed', { failure_reason: reason });
+    }
     if (err instanceof RerankError) throw err;
     // AbortError on timeout — classify cleanly.
     if (err && typeof err === 'object' && (err as any).name === 'AbortError') {
