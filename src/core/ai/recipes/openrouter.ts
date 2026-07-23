@@ -99,6 +99,30 @@ export const openrouter: Recipe = {
       // Let upstream errors surface per-model.
       price_last_verified: '2026-05-20',
     },
+    // v0.42 (Quarry Q2/G2) — Cohere cross-encoder rerankers proxied by
+    // OpenRouter. Reranking is NOT in the AI SDK abstraction; `gateway.rerank()`
+    // makes a native POST to `${base_url}${path}` = https://openrouter.ai/api/v1/rerank
+    // with `{model, query, documents, top_n}` and parses sorted
+    // `results[{index, relevance_score}]` plus `usage`. Reorder-only: the caller
+    // (`applyReranker`) sends `top_n = documents.length` so every input is scored
+    // and fails open to hybrid order on any malformed/failed response.
+    reranker: {
+      // Official OpenRouter Cohere rerank slugs (verified 2026-07-24). The
+      // openai-compat tier does not hard-enforce this at the SDK layer, but
+      // gateway.rerank() DOES enforce it directly (CDX2-F11).
+      models: ['cohere/rerank-4-fast', 'cohere/rerank-4-pro', 'cohere/rerank-v3.5'],
+      default_model: 'cohere/rerank-4-fast',
+      // Leaf path concatenated onto base_url_default → /api/v1/rerank.
+      path: '/rerank',
+      // Cohere rerank bills PER SEARCH, not per token. cohere/rerank-4-fast is
+      // $0.002/search (openrouter.ai/cohere/rerank-4-fast, read 2026-07-24).
+      cost_per_search_usd: 0.002,
+      price_last_verified: '2026-07-24',
+      // Conservative INTERNAL guard — a gbrain safety cap, NOT an OpenRouter-
+      // published limit. 512 KB comfortably holds a 50-candidate horizon while
+      // failing open long before any provider hard limit.
+      max_payload_bytes: 512_000,
+    },
   },
   setup_hint:
     'Get an API key at https://openrouter.ai/settings/keys, then `export OPENROUTER_API_KEY=...` and use `openrouter:<provider>/<model>`. Optional overrides: OPENROUTER_BASE_URL (proxy), OPENROUTER_REFERER (attribution URL), OPENROUTER_TITLE (attribution name).',
