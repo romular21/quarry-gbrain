@@ -459,17 +459,23 @@ export function sourceScopeOpts(ctx: OperationContext): { sourceId?: string; sou
   return {};
 }
 
-/** Map the operation-layer scope names onto runThink's public options. */
-export function thinkSourceScopeOpts(ctx: OperationContext): {
+/**
+ * Map the operation-layer scope names onto runThink's public options.
+ * When a per-call source_id is supplied it is resolved against the caller's
+ * grant via resolveRequestedScope before reaching runThink, so an out-of-grant
+ * source is denied before retrieval or provider work.
+ */
+export function thinkSourceScopeOpts(
+  ctx: OperationContext,
+  requestedSourceId?: string,
+): {
   sourceId?: string;
   allowedSources?: string[];
 } {
-  const scope = sourceScopeOpts(ctx);
-  return scope.sourceIds !== undefined
-    ? { allowedSources: scope.sourceIds }
-    : scope.sourceId !== undefined
-      ? { sourceId: scope.sourceId }
-      : {};
+  const scope = resolveRequestedScope(ctx, requestedSourceId);
+  if (scope.sourceId !== undefined) return { sourceId: scope.sourceId };
+  if (scope.sourceIds !== undefined) return { allowedSources: scope.sourceIds };
+  return {};
 }
 
 /**
@@ -1886,6 +1892,7 @@ const think: Operation = {
     save: { type: 'boolean', description: 'Persist a synthesis page (local-CLI only; ignored for MCP)' },
     take: { type: 'boolean', description: 'Append a take row to the anchor page (requires anchor)' },
     model: { type: 'string', description: 'Model override (alias or full id). Falls through models.think → models.default → GBRAIN_MODEL → opus.' },
+    source_id: { type: 'string', description: 'Scope think to one source the caller is granted (omitted to search across the full grant)' },
     since: { type: 'string', description: 'Start of temporal window (YYYY-MM-DD or YYYY-MM)' },
     until: { type: 'string', description: 'End of temporal window' },
   },
@@ -1900,7 +1907,9 @@ const think: Operation = {
     // present) OR the scalar; we pass both through to runThink which
     // forwards to findTrajectory. CLI callers don't go through this op
     // and get default scope + remote=false from runThink's CLI path.
-    const thinkScope = thinkSourceScopeOpts(ctx);
+    // Quarry G1: optional per-call source_id is resolved against the caller's
+    // grant before runThink so out-of-grant sources fail before retrieval.
+    const thinkScope = thinkSourceScopeOpts(ctx, p.source_id ? String(p.source_id) : undefined);
     const { runThink, persistSynthesis } = await import('./think/index.ts');
     const result = await runThink(ctx.engine, {
       question: String(p.question),

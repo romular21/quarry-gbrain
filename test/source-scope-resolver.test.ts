@@ -69,6 +69,33 @@ describe('think operation → runThink scope propagation', () => {
     });
     expect(thinkSourceScopeOpts(ctx)).toEqual({ allowedSources: ['tenant-a', 'tenant-b'] });
   });
+
+  test('requested source_id inside grant maps to scalar sourceId', () => {
+    const ctx = ctxOf({
+      remote: true,
+      sourceId: 'tenant-a',
+      auth: { allowedSources: ['tenant-a', 'tenant-b'] } as OperationContext['auth'],
+    });
+    expect(thinkSourceScopeOpts(ctx, 'tenant-b')).toEqual({ sourceId: 'tenant-b' });
+  });
+
+  test('requested source_id outside grant is denied before runThink opts', () => {
+    const ctx = ctxOf({
+      remote: true,
+      sourceId: 'tenant-a',
+      auth: { allowedSources: ['tenant-a'] } as OperationContext['auth'],
+    });
+    expect(() => thinkSourceScopeOpts(ctx, 'tenant-b')).toThrow(OperationError);
+    try {
+      thinkSourceScopeOpts(ctx, 'tenant-b');
+    } catch (e) {
+      expect((e as OperationError).code).toBe('permission_denied');
+    }
+  });
+
+  test('trusted local requested source_id bypasses grant check', () => {
+    expect(thinkSourceScopeOpts(ctxOf({ remote: false }), 'anything')).toEqual({ sourceId: 'anything' });
+  });
 });
 
 describe('resolveRequestedScope — explicit source_id', () => {
