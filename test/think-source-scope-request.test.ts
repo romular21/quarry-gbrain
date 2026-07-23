@@ -115,4 +115,25 @@ describe('think op — per-call source_id scope', () => {
 
     expect(runThinkCalls).toBe(0);
   });
+
+  test('empty string source_id is rejected as invalid before runThink or provider call', async () => {
+    let runThinkCalls = 0;
+    const thinkSpy = spyOn(thinkModule, 'runThink').mockImplementation(async () => {
+      runThinkCalls += 1;
+      return stubResult();
+    });
+
+    try {
+      await expect(
+        think.handler(context({ getConfig: async () => 'false' }), {
+          question: 'empty source id',
+          source_id: '',
+        }),
+      ).rejects.toMatchObject({ code: 'invalid_params' } satisfies Partial<OperationError>);
+    } finally {
+      thinkSpy.mockRestore();
+    }
+
+    expect(runThinkCalls).toBe(0);
+  });
 });

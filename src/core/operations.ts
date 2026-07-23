@@ -1909,7 +1909,15 @@ const think: Operation = {
     // and get default scope + remote=false from runThink's CLI path.
     // Quarry G1: optional per-call source_id is resolved against the caller's
     // grant before runThink so out-of-grant sources fail before retrieval.
-    const thinkScope = thinkSourceScopeOpts(ctx, p.source_id ? String(p.source_id) : undefined);
+    const requestedSourceIdRaw = p.source_id !== undefined ? String(p.source_id) : undefined;
+    if (requestedSourceIdRaw !== undefined && requestedSourceIdRaw.length === 0) {
+      throw new OperationError(
+        'invalid_params',
+        'source_id must be a non-empty string',
+        'Omit source_id to search across your grant.',
+      );
+    }
+    const thinkScope = thinkSourceScopeOpts(ctx, requestedSourceIdRaw);
     const { runThink, persistSynthesis } = await import('./think/index.ts');
     const result = await runThink(ctx.engine, {
       question: String(p.question),
