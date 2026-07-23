@@ -892,6 +892,12 @@ export interface SearchOpts {
   limit?: number;
   offset?: number;
   /**
+   * Quarry Q2/G2 — opaque operation id (32 lowercase hex) threaded to the
+   * reranker paid-call usage audit for cross-system correlation. Pass-through
+   * ONLY: it never affects retrieval, ranking, cache identity or knobsHash.
+   */
+  operationId?: string;
+  /**
    * v0.42 — intent-aware adaptive return-sizing. `true` enables with config/
    * default caps; an object overrides caps per-call; omitted/`false` = off
    * (default, no behavior change). Trims the ranked set to an intent-driven

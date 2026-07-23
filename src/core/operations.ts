@@ -1472,12 +1472,31 @@ const search: Operation = {
       type: 'boolean',
       description: 'Optional hybrid-search reranker cliff-cut override; ignored in operator keyword-only mode. Pass false to preserve the requested breadth.',
     },
+    operation_id: {
+      type: 'string',
+      description: 'Optional opaque caller operation id (exactly 32 lowercase hex) for reranker paid-call audit correlation. Pass-through only — never affects retrieval, ranking or cache identity.',
+    },
   },
   handler: async (ctx, p) => {
     const startedAt = Date.now();
     const queryText = p.query as string;
     const limit = (p.limit as number) || 20;
     const offset = (p.offset as number) || 0;
+    // Quarry Q2/G2 — validate the optional operation-id SHAPE at the boundary
+    // (loud reject before any provider dispatch), then thread it as an opaque
+    // correlation token only. Absent is fine; a malformed value is a caller
+    // contract violation, not silently dropped.
+    let operationId: string | undefined;
+    if (p.operation_id !== undefined) {
+      if (typeof p.operation_id !== 'string' || !/^[0-9a-f]{32}$/.test(p.operation_id)) {
+        throw new OperationError(
+          'invalid_params',
+          'Invalid operation_id: expected exactly 32 lowercase hex characters.',
+          'gbrain search "<query>"',
+        );
+      }
+      operationId = p.operation_id;
+    }
     // Per-call source selection must pass through the shared trust + grant
     // resolver before any config, provider, or engine work. Omission preserves
     // the existing full-grant behavior; an out-of-grant request fails closed.
@@ -1523,6 +1542,7 @@ const search: Operation = {
       tokenBudget: typeof p.token_budget === 'number' ? (p.token_budget as number) : undefined,
       adaptiveReturn: typeof p.adaptive_return === 'boolean' ? (p.adaptive_return as boolean) : undefined,
       autocut: typeof p.autocut === 'boolean' ? (p.autocut as boolean) : undefined,
+      ...(operationId ? { operationId } : {}),
       onMeta: (m) => { capturedMeta = m; },
     });
     const latency_ms = Date.now() - startedAt;
