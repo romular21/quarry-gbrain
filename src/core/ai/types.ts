@@ -198,8 +198,8 @@ export interface RerankerTouchpoint {
   /**
    * Per-SEARCH price (USD), for rerankers billed per search rather than per
    * token — e.g. Cohere rerank on OpenRouter charges $0.002/search regardless
-   * of token count. The paid-call audit records this × 1 search per call as the
-   * estimated cost; it does NOT pretend token pricing applies to search units.
+   * of token count. The paid-call audit multiplies this by provider-reported
+   * search units; it does NOT pretend token pricing applies to reranking.
    * Mutually informational with `cost_per_1m_tokens_usd`; a touchpoint declares
    * whichever unit its provider actually bills.
    */

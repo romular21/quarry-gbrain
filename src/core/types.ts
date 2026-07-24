@@ -1080,7 +1080,15 @@ export interface SearchOpts {
     model?: string;
     timeoutMs?: number;
     // Test seam — never set in production code.
-    rerankerFn?: (input: { query: string; documents: string[]; topN?: number; model?: string; signal?: AbortSignal; timeoutMs?: number }) => Promise<{ index: number; relevanceScore: number }[]>;
+    rerankerFn?: (input: {
+      query: string;
+      documents: string[];
+      topN?: number;
+      model?: string;
+      signal?: AbortSignal;
+      timeoutMs?: number;
+      operationId?: string;
+    }) => Promise<{ index: number; relevanceScore: number }[]>;
   };
   /**
    * v0.35.6.0 — floor-ratio gate for metadata-axis boost stages.

@@ -103,6 +103,7 @@ describe('gateway.rerank() — paid-call usage audit', () => {
       expect(s.provider).toBe('openrouter');
       expect(s.model).toBe('cohere/rerank-4-fast');
       expect(s.document_count).toBe(1);
+      expect(s.duration_ms).toBeGreaterThanOrEqual(0);
     });
   });
 
@@ -112,6 +113,7 @@ describe('gateway.rerank() — paid-call usage audit', () => {
       await rerank({ query: 'q', documents: ['d'], topN: 1 });
       const s = readRecentRerankUsage(7).find((r) => r.status === 'succeeded')!;
       expect(s.search_units).toBeNull();
+      expect(s.estimated_cost_usd).toBeNull(); // never invent a unit count
       expect(s.operation_id).toBeNull();
     });
   });
@@ -131,14 +133,70 @@ describe('gateway.rerank() — paid-call usage audit', () => {
     });
   });
 
-  test('malformed-but-200 still records succeeded (billed) then throws', async () => {
+  test('malformed-but-200 records failed while preserving billed usage and cost', async () => {
     await withFreshAuditDir(async () => {
       __setRerankTransportForTests(async () =>
         mockResp({ results: [{ index: 9, relevance_score: 0.9 }], usage: { search_units: 1 } }));
       try { await rerank({ query: 'q', documents: ['d'], topN: 1 }); } catch { /* fail-open */ }
       const rows = readRecentRerankUsage(7);
-      expect(rows.some((r) => r.status === 'succeeded')).toBe(true);
-      expect(rows.some((r) => r.status === 'failed')).toBe(false);
+      expect(rows.some((r) => r.status === 'succeeded')).toBe(false);
+      const failed = rows.find((r) => r.status === 'failed');
+      expect(failed).toBeDefined();
+      expect(failed!.search_units).toBe(1);
+      expect(failed!.estimated_cost_usd).toBe(0.002);
+      expect(failed!.duration_ms).toBeGreaterThanOrEqual(0);
+    });
+  });
+
+  test('full-permutation request rejects a short response and records failed', async () => {
+    await withFreshAuditDir(async () => {
+      __setRerankTransportForTests(async () =>
+        mockResp({
+          results: [{ index: 0, relevance_score: 0.9 }],
+          usage: { search_units: 1 },
+        }));
+      await expect(
+        rerank({ query: 'q', documents: ['a', 'b'], topN: 2 }),
+      ).rejects.toThrow(RerankError);
+      const rows = readRecentRerankUsage(7);
+      expect(rows.some((r) => r.status === 'succeeded')).toBe(false);
+      expect(rows.find((r) => r.status === 'failed')?.search_units).toBe(1);
+    });
+  });
+
+  test('negative provider usage is invalid and never creates negative cost', async () => {
+    await withFreshAuditDir(async () => {
+      __setRerankTransportForTests(async () =>
+        mockResp({
+          results: [{ index: 0, relevance_score: 0.9 }],
+          usage: { search_units: -1 },
+        }));
+      await rerank({ query: 'q', documents: ['d'], topN: 1 });
+      const succeeded = readRecentRerankUsage(7).find((r) => r.status === 'succeeded')!;
+      expect(succeeded.search_units).toBeNull();
+      expect(succeeded.estimated_cost_usd).toBeNull();
+    });
+  });
+
+  test('real timeout path records cancelled and throws reason=timeout', async () => {
+    await withFreshAuditDir(async () => {
+      __setRerankTransportForTests(async (_url, init) =>
+        await new Promise<Response>((_resolve, reject) => {
+          const signal = init.signal!;
+          signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+        }));
+      try {
+        await rerank({ query: 'q', documents: ['d'], topN: 1, timeoutMs: 5 });
+        throw new Error('should have timed out');
+      } catch (err) {
+        expect(err).toBeInstanceOf(RerankError);
+        expect((err as RerankError).reason).toBe('timeout');
+      }
+      const rows = readRecentRerankUsage(7);
+      const cancelled = rows.find((r) => r.status === 'cancelled');
+      expect(cancelled).toBeDefined();
+      expect(cancelled!.failure_reason).toBe('timeout');
+      expect(cancelled!.duration_ms).toBeGreaterThanOrEqual(0);
     });
   });
 

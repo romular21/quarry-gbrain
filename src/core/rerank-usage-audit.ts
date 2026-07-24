@@ -45,14 +45,16 @@ export interface RerankUsageEvent {
   status: RerankUsageStatus;
   /** Documents sent to the reranker. The COUNT only — never the text. */
   document_count: number;
+  /** Monotonic elapsed time for a terminal event; null before completion. */
+  duration_ms: number | null;
   /**
    * Provider-reported search units, or null when the provider did not return
    * usage. NEVER fabricated and NEVER recorded as 0 to mean "unknown".
    */
   search_units: number | null;
   /**
-   * Estimated USD cost (`cost_per_search_usd` × 1 search per call), or null
-   * when the touchpoint declares no per-search price card.
+   * Estimated USD cost (`cost_per_search_usd` × provider-reported
+   * `search_units`), or null when either fact is unavailable.
    */
   estimated_cost_usd: number | null;
   /** Price-card revision string (touchpoint `price_last_verified`), or null. */

@@ -43,6 +43,7 @@ function baseRow(over: Partial<RerankUsageEvent> = {}): Omit<RerankUsageEvent, '
     model: 'cohere/rerank-4-fast',
     status: 'pending',
     document_count: 50,
+    duration_ms: null,
     search_units: null,
     estimated_cost_usd: null,
     price_card_revision: '2026-07-24',
@@ -60,16 +61,18 @@ describe('rerank-usage audit', () => {
       logRerankUsage(baseRow({
         call_id: call,
         status: 'succeeded',
+        duration_ms: 12.5,
         search_units: 3,
-        estimated_cost_usd: 0.002,
+        estimated_cost_usd: 0.006,
       }));
       const rows = readRecentRerankUsage(7).filter((r) => r.call_id === call);
       expect(rows.map((r) => r.status).sort()).toEqual(
         ['pending', 'succeeded', 'unknown-after-dispatch'],
       );
       const succeeded = rows.find((r) => r.status === 'succeeded')!;
+      expect(succeeded.duration_ms).toBe(12.5);
       expect(succeeded.search_units).toBe(3);
-      expect(succeeded.estimated_cost_usd).toBe(0.002);
+      expect(succeeded.estimated_cost_usd).toBe(0.006);
       expect(succeeded.price_card_revision).toBe('2026-07-24');
     });
   });

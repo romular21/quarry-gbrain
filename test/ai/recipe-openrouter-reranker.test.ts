@@ -60,7 +60,12 @@ describe('OpenRouter reranker touchpoint — wiring', () => {
     let body: any = null;
     __setRerankTransportForTests(async (_u, init) => {
       body = JSON.parse(init.body as string);
-      return mockResp({ results: [{ index: 0, relevance_score: 0.9 }] });
+      return mockResp({
+        results: [
+          { index: 0, relevance_score: 0.9 },
+          { index: 1, relevance_score: 0.8 },
+        ],
+      });
     });
     await rerank({ query: 'q', documents: ['d1', 'd2'], topN: 2 });
     expect(body).toEqual({

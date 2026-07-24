@@ -1460,7 +1460,7 @@ export async function hybridSearch(
     timeoutMs: resolvedMode.reranker_timeout_ms,
   };
   const reranked = rerankerOpts.enabled
-    ? await applyReranker(query, deduped, { ...rerankerOpts, operationId: opts?.operationId } as any)
+    ? await applyReranker(query, deduped, { ...rerankerOpts, operationId: opts?.operationId })
     : deduped;
 
   // T3 — free-text alias hop. Runs AFTER rerank so a query that is a page's

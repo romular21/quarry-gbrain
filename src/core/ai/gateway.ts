@@ -3590,11 +3590,19 @@ export async function rerank(input: RerankInput): Promise<RerankResult[]> {
       : null;
   const _costPerSearch = typeof tp.cost_per_search_usd === 'number' ? tp.cost_per_search_usd : null;
   const _priceRev = tp.price_last_verified ?? null;
+  const _auditStartedAt = performance.now();
+  let _observedSearchUnits: number | null = null;
+  let _observedEstimatedCost: number | null = null;
   let _terminalLogged = false;
   const _audit = (
     status: RerankUsageStatus,
-    over: { search_units?: number | null; estimated_cost_usd?: number | null; failure_reason?: string | null } = {},
+    over: {
+      search_units?: number | null;
+      estimated_cost_usd?: number | null;
+      failure_reason?: string | null;
+    } = {},
   ): void => {
+    const terminal = status === 'succeeded' || status === 'failed' || status === 'cancelled';
     try {
       logRerankUsage({
         call_id: _callId,
@@ -3604,6 +3612,7 @@ export async function rerank(input: RerankInput): Promise<RerankResult[]> {
         model: parsed.modelId,
         status,
         document_count: input.documents.length,
+        duration_ms: terminal ? Number((performance.now() - _auditStartedAt).toFixed(3)) : null,
         search_units: over.search_units ?? null,
         estimated_cost_usd: over.estimated_cost_usd ?? null,
         price_card_revision: _priceRev,
@@ -3612,7 +3621,7 @@ export async function rerank(input: RerankInput): Promise<RerankResult[]> {
     } catch {
       // Audit is a best-effort trace; never break search.
     }
-    if (status === 'succeeded' || status === 'failed' || status === 'cancelled') _terminalLogged = true;
+    if (terminal) _terminalLogged = true;
   };
   _audit('pending');
 
@@ -3623,7 +3632,11 @@ export async function rerank(input: RerankInput): Promise<RerankResult[]> {
   // Timeout via AbortController; merges with caller-supplied signal.
   const ctrl = new AbortController();
   const timeoutMs = input.timeoutMs ?? DEFAULT_RERANK_TIMEOUT_MS;
-  const t = setTimeout(() => ctrl.abort(new Error('rerank timed out')), timeoutMs);
+  let timedOut = false;
+  const t = setTimeout(() => {
+    timedOut = true;
+    ctrl.abort(new Error('rerank timed out'));
+  }, timeoutMs);
   if (input.signal) {
     if (input.signal.aborted) ctrl.abort(input.signal.reason);
     else input.signal.addEventListener('abort', () => ctrl.abort(input.signal!.reason), { once: true });
@@ -3677,22 +3690,28 @@ export async function rerank(input: RerankInput): Promise<RerankResult[]> {
       throw new RerankError(msg, reason, resp.status);
     }
     const json: any = await resp.json();
-    // HTTP 200 ⟹ the provider processed the request (billed). Record the paid
-    // call — with provider usage when present — BEFORE validating the result
-    // shape, so a malformed-but-billed response is never erased from the audit
-    // even though the caller then fails open. search_units stays null (never 0)
-    // when the provider returns no usage; estimated cost is search_units × the
-    // per-search price card, or null when no price card is declared.
-    const _searchUnits =
-      json && json.usage && typeof json.usage.search_units === 'number' && Number.isFinite(json.usage.search_units)
+    // HTTP 200 means the provider may have billed the request. Capture usage
+    // before validating the result shape so a malformed-but-billed response
+    // can terminate as failed without losing its usage/cost. search_units stays
+    // null (never 0) when the provider returns no usable value.
+    _observedSearchUnits =
+      json && json.usage && typeof json.usage.search_units === 'number' &&
+      Number.isFinite(json.usage.search_units) && json.usage.search_units >= 0
         ? (json.usage.search_units as number)
         : null;
-    const _estCost =
-      _costPerSearch !== null ? Number(((_searchUnits ?? 1) * _costPerSearch).toFixed(6)) : null;
-    _audit('succeeded', { search_units: _searchUnits, estimated_cost_usd: _estCost });
+    // Cost is DERIVED from reported usage: null when the provider returned no
+    // usage (we never invent a unit count) OR when no per-search price card is
+    // declared. Otherwise search_units × price, rounded to cents-of-a-milli.
+    _observedEstimatedCost =
+      _costPerSearch !== null && _observedSearchUnits !== null
+        ? Number((_observedSearchUnits * _costPerSearch).toFixed(6))
+        : null;
 
     if (!json || !Array.isArray(json.results)) {
       throw new RerankError('rerank: malformed response (no results array)', 'unknown');
+    }
+    if (input.topN === input.documents.length && json.results.length !== input.documents.length) {
+      throw new RerankError('rerank: malformed response (incomplete permutation)', 'unknown');
     }
     // Strict per-item validation (Quarry Q2/G2). Every result must carry an
     // INTEGER index in [0, documents.length), unique across the response, and a
@@ -3716,22 +3735,37 @@ export async function rerank(input: RerankInput): Promise<RerankResult[]> {
       _seen.add(idx);
       mapped.push({ index: idx, relevanceScore: score });
     }
+    _audit('succeeded', {
+      search_units: _observedSearchUnits,
+      estimated_cost_usd: _observedEstimatedCost,
+    });
     _rerankRecord();
     return mapped;
   } catch (err) {
     _rerankRecord();
-    // Terminal paid-call audit — only when we hadn't already logged 'succeeded'
-    // (a malformed-but-200 response logs succeeded first, then throws here).
+    // Terminal paid-call audit — only when a successful validated response has
+    // not already emitted its succeeded row. Malformed HTTP-200 responses keep
+    // any observed usage/cost but terminate as failed.
     if (!_terminalLogged) {
       const reason =
-        err instanceof RerankError
+        timedOut
+          ? 'timeout'
+          : err instanceof RerankError
           ? err.reason
           : err && typeof err === 'object' && (err as any).name === 'AbortError'
           ? 'timeout'
           : 'network';
-      _audit(reason === 'timeout' ? 'cancelled' : 'failed', { failure_reason: reason });
+      _audit(reason === 'timeout' ? 'cancelled' : 'failed', {
+        search_units: _observedSearchUnits,
+        estimated_cost_usd: _observedEstimatedCost,
+        failure_reason: reason,
+      });
     }
     if (err instanceof RerankError) throw err;
+    if (timedOut) {
+      const msg = err instanceof Error ? err.message : 'rerank timed out';
+      throw new RerankError(msg || 'rerank timed out', 'timeout');
+    }
     // AbortError on timeout — classify cleanly.
     if (err && typeof err === 'object' && (err as any).name === 'AbortError') {
       const msg = (err as Error).message || 'rerank aborted';
